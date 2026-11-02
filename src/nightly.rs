@@ -1229,20 +1229,39 @@ impl<F: Fn(&Report)> Run<F> {
         partial: &Path,
         sha256: Option<&str>,
     ) -> Result<()> {
-        let mut response = client.get(url).send()?.error_for_status()?;
-        let total = response.content_length();
+        let chunks = stream(client, url);
         let mut file = fs::File::create(partial)?;
         let mut hash = Sha256::new();
-        let mut buffer = vec![0u8; 256 * 1024];
         let mut received = 0u64;
+        let mut total = None;
+        let mut heard = Instant::now();
         loop {
             cancelled()?;
-            let size = response.read(&mut buffer)?;
-            if size == 0 {
-                break;
-            }
-            file.write_all(&buffer[..size])?;
-            hash.update(&buffer[..size]);
+            // A connection that goes quiet fails and is retried, instead of
+            // the build waiting on it for an hour.
+            let piece = match chunks.recv_timeout(Duration::from_secs(1)) {
+                Ok(piece) => piece,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    ensure!(
+                        heard.elapsed() < DOWNLOAD_STALL,
+                        "The download stopped receiving data"
+                    );
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => bail!("The download ended early"),
+            };
+            heard = Instant::now();
+            let data = match piece? {
+                Piece::Start(length) => {
+                    total = length;
+                    continue;
+                }
+                Piece::End => break,
+                Piece::Data(data) => data,
+            };
+            let size = data.len();
+            file.write_all(&data)?;
+            hash.update(&data);
             received += size as u64;
             let megabytes = received as f64 / 1e6;
             match total {
@@ -1620,6 +1639,52 @@ fn client() -> Result<reqwest::blocking::Client> {
         .connect_timeout(Duration::from_secs(20))
         .timeout(Duration::from_secs(60 * 60))
         .build()?)
+}
+
+/// How long a download may go without data before it is retried.
+const DOWNLOAD_STALL: Duration = Duration::from_secs(30);
+enum Piece {
+    Start(Option<u64>),
+    Data(Vec<u8>),
+    End,
+}
+/// Fetches `url` on its own thread, so a stalled connection never blocks
+/// Cancel or the stall check. The thread ends when the reader goes away.
+fn stream(client: &reqwest::blocking::Client, url: &str) -> mpsc::Receiver<Result<Piece>> {
+    let (sender, receiver) = mpsc::sync_channel(8);
+    let (client, url) = (client.clone(), url.to_owned());
+    thread::spawn(move || {
+        let mut response = match client
+            .get(&url)
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let _ = sender.send(Err(error.into()));
+                return;
+            }
+        };
+        if sender
+            .send(Ok(Piece::Start(response.content_length())))
+            .is_err()
+        {
+            return;
+        }
+        let mut buffer = vec![0u8; 256 * 1024];
+        loop {
+            let piece = match response.read(&mut buffer) {
+                Ok(0) => Ok(Piece::End),
+                Ok(size) => Ok(Piece::Data(buffer[..size].to_vec())),
+                Err(error) => Err(error.into()),
+            };
+            let last = !matches!(piece, Ok(Piece::Data(_)));
+            if sender.send(piece).is_err() || last {
+                return;
+            }
+        }
+    });
+    receiver
 }
 
 /// A small text file, with retries.
@@ -2383,6 +2448,40 @@ mod other {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_silent_download_never_blocks_the_build() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (done, hold) = mpsc::channel::<()>();
+        thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request);
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc")
+                .unwrap();
+            // Holds the connection open without sending the rest.
+            let _ = hold.recv();
+        });
+        let client = reqwest::blocking::Client::new();
+        let pieces = stream(&client, &format!("http://{address}/file"));
+        let wait = || {
+            pieces
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap()
+        };
+        assert!(matches!(wait(), Piece::Start(Some(10))));
+        assert!(matches!(wait(), Piece::Data(data) if data == b"abc"));
+        // Silence comes back as a timeout the build can act on.
+        assert!(matches!(
+            pieces.recv_timeout(Duration::from_millis(300)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(done);
+    }
 
     #[test]
     fn progress_is_read_from_each_tool() {
