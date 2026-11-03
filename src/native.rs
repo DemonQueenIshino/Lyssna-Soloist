@@ -1493,6 +1493,44 @@ impl PlayModes {
     }
 }
 
+/// Spotify knows this computer by one device ID. librespot's default is a new
+/// ID per connection, so each reconnect looked like another device: a hosted
+/// Jam lost its host, and other apps listed stale copies of Lyssna.
+pub(crate) fn session_config() -> SessionConfig {
+    let mut config = SessionConfig {
+        client_id: crate::auth::AUDIO_CLIENT_ID.into(),
+        ..SessionConfig::default()
+    };
+    static DEVICE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    config.device_id = DEVICE_ID
+        .get_or_init(|| {
+            let path = crate::config::data_dir().map(|dir| dir.join("device-id"));
+            let saved = path
+                .as_ref()
+                .ok()
+                .and_then(|path| std::fs::read_to_string(path).ok());
+            if let Some(id) = saved.as_deref().and_then(saved_device_id) {
+                return id;
+            }
+            if let Ok(path) = path {
+                let _ = std::fs::write(path, &config.device_id);
+            }
+            config.device_id.clone()
+        })
+        .clone();
+    config
+}
+
+fn saved_device_id(saved: &str) -> Option<String> {
+    let id = saved.trim();
+    (!id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-'))
+    .then(|| id.to_owned())
+}
+
 static HOSTED_JAMS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, String>>> =
     std::sync::LazyLock::new(Default::default);
 
@@ -2267,13 +2305,7 @@ async fn run(
     let (session, credentials) = match login.session {
         Some(session) => (session, None),
         None => (
-            Session::new(
-                SessionConfig {
-                    client_id: crate::auth::AUDIO_CLIENT_ID.into(),
-                    ..SessionConfig::default()
-                },
-                crate::audio_cache::cache().ok(),
-            ),
+            Session::new(session_config(), crate::audio_cache::cache().ok()),
             Some(login.credentials),
         ),
     };
@@ -2765,6 +2797,14 @@ pub(crate) fn with_live_session<T>(check: impl AsyncFnOnce(&Session) -> T) -> T 
 #[cfg(test)]
 mod hosted_jam_tests {
     use super::*;
+    #[test]
+    fn this_computer_keeps_its_saved_device_id() {
+        let id = SessionConfig::default().device_id;
+        assert_eq!(saved_device_id(&format!("{id}\r\n")), Some(id));
+        assert_eq!(saved_device_id(""), None);
+        assert_eq!(saved_device_id("not an id"), None);
+        assert_eq!(saved_device_id(&"a".repeat(65)), None);
+    }
     #[test]
     fn a_hosted_jam_outlives_a_reconnect_until_it_ends() {
         remember_hosted_jam("host-test", Some("session".into()));

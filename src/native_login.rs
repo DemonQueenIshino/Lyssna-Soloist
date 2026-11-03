@@ -10,7 +10,7 @@ use crate::{
     native,
 };
 use anyhow::{Context, Result, ensure};
-use librespot_core::{Session, authentication::Credentials, config::SessionConfig};
+use librespot_core::{Session, authentication::Credentials};
 use librespot_protocol::authentication::AuthenticationType;
 
 pub(crate) struct Connected(pub Session);
@@ -42,7 +42,10 @@ impl Authenticated {
             .unwrap();
         let connection = {
             let _entered = runtime.enter();
-            Connected(Session::new(SessionConfig::default(), None))
+            Connected(Session::new(
+                librespot_core::config::SessionConfig::default(),
+                None,
+            ))
         };
         Self {
             profile,
@@ -87,7 +90,7 @@ pub fn authenticate(
         .enable_all()
         .build()?;
     let result = runtime.block_on(async {
-        let connected = Connected(Session::new(SessionConfig { client_id: auth::AUDIO_CLIENT_ID.into(), ..Default::default() }, crate::audio_cache::cache().ok()));
+        let connected = Connected(Session::new(native::session_config(), crate::audio_cache::cache().ok()));
         let session = &connected.0;
         let operation = async {
             tokio::time::timeout(Duration::from_secs(40), session.connect(credentials, false)).await
