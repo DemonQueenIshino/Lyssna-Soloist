@@ -1,7 +1,8 @@
 //! Lyssna was called SpotiFlex. On the first start after the rename, this
 //! moves what SpotiFlex kept under its name to Lyssna's: settings, caches,
 //! the interface's storage, the sign-in startup entry and, on Windows, the
-//! install itself. Saved credentials move when first read (see
+//! install itself. The interface's storage also moves from earlier app
+//! identifiers to the current one. Saved credentials move when first read (see
 //! `credential`).
 use std::{
     fs, io,
@@ -10,8 +11,9 @@ use std::{
 
 const FORMER_NAME: &str = "SpotiFlex";
 const NAME: &str = "Lyssna";
-const FORMER_IDENTIFIER: &str = "xyz.clypdat.spotiflex";
-const IDENTIFIER: &str = "xyz.clypdat.lyssna";
+/// Identifiers the app had before, oldest first.
+const FORMER_IDENTIFIERS: [&str; 2] = ["xyz.clypdat.spotiflex", "xyz.clypdat.lyssna"];
+const IDENTIFIER: &str = "app.lyssna.desktop";
 
 /// Move SpotiFlex's folders to Lyssna's. Runs before anything reads them.
 pub fn migrate() {
@@ -56,14 +58,18 @@ fn folders() -> Vec<(PathBuf, PathBuf)> {
             base.data_local_dir(),
             base.cache_dir(),
         ] {
-            pairs.push((dir.join(FORMER_IDENTIFIER), dir.join(IDENTIFIER)));
+            for former in FORMER_IDENTIFIERS {
+                pairs.push((dir.join(former), dir.join(IDENTIFIER)));
+            }
         }
         // WebKit names its storage by the bundle identifier, which an app
         // updated in place keeps until it is installed again.
         #[cfg(target_os = "macos")]
         if crate::mac_bundle::identifier().as_deref() == Some(IDENTIFIER) {
             let webkit = base.home_dir().join("Library/WebKit");
-            pairs.push((webkit.join(FORMER_IDENTIFIER), webkit.join(IDENTIFIER)));
+            for former in FORMER_IDENTIFIERS {
+                pairs.push((webkit.join(former), webkit.join(IDENTIFIER)));
+            }
         }
     }
     let mut seen = Vec::new();
