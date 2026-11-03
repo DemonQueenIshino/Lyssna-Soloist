@@ -1493,6 +1493,22 @@ impl PlayModes {
     }
 }
 
+static HOSTED_JAMS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn remember_hosted_jam(account: &str, session_id: Option<String>) {
+    if let Ok(mut hosted) = HOSTED_JAMS.lock() {
+        match session_id {
+            Some(session_id) => hosted.insert(account.to_owned(), session_id),
+            None => hosted.remove(account),
+        };
+    }
+}
+
+fn hosted_jam(account: &str) -> Option<String> {
+    HOSTED_JAMS.lock().ok()?.get(account).cloned()
+}
+
 fn apply_control(
     spirc: &Spirc,
     action: PlayerAction,
@@ -2322,6 +2338,12 @@ async fn run(
     if let Ok(mut devices) = devices.lock() {
         *devices = spirc.devices();
     }
+    // A new connection after a dropout starts knowing no Jam. Without this
+    // the Jam's next transfer makes the host follow its own Jam, leaving it
+    // with no host to hold pauses and queued songs.
+    if let Some(session_id) = hosted_jam(account) {
+        let _ = spirc.host_jam(Some(session_id));
+    }
     if cancelled.load(Ordering::Relaxed) {
         session.shutdown();
         return Outcome::Stopped;
@@ -2461,6 +2483,7 @@ async fn run(
                 if matches!(action,PlayerAction::Play(Some(_))|PlayerAction::PreparedDJ{..}|PlayerAction::PlayUris{..}|PlayerAction::Resume{..}|PlayerAction::PlayContext{..}|PlayerAction::RestoreDJ{..}){paused_position=None;intent.loading_track(selected_track(&action),std::time::Instant::now());load_due=Some(std::time::Instant::now()+LOAD_TIMEOUT);}
                 if let PlayerAction::Volume(volume)=&action{mixer.set_volume((u32::from((*volume).min(100))*u32::from(u16::MAX)/100)as u16);emit(NativeEvent::Transport{shuffle:None,repeat:None,volume:Some((*volume).min(100))});}
                 let before=modes.clone();
+                if let PlayerAction::HostJam(session_id) = &action { remember_hosted_jam(account, session_id.clone()); }
                 if apply_control(&spirc, action, &mut active, &mut modes, &mut ordered).is_err() {loaded.store(false,Ordering::Release);intent.reset(); emit(NativeEvent::ControlError("Native playback command failed. Reconnect native audio in Settings.".into())); }
                 if modes!=before{emit(NativeEvent::Modes(modes.clone()));}}
             }
@@ -2739,6 +2762,17 @@ pub(crate) fn with_live_session<T>(check: impl AsyncFnOnce(&Session) -> T) -> T 
     login.runtime.block_on(check(&session))
 }
 
+#[cfg(test)]
+mod hosted_jam_tests {
+    use super::*;
+    #[test]
+    fn a_hosted_jam_outlives_a_reconnect_until_it_ends() {
+        remember_hosted_jam("host-test", Some("session".into()));
+        assert_eq!(hosted_jam("host-test").as_deref(), Some("session"));
+        remember_hosted_jam("host-test", None);
+        assert_eq!(hosted_jam("host-test"), None);
+    }
+}
 #[cfg(test)]
 mod tests {
     #[test]

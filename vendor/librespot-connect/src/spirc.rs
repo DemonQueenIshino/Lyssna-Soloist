@@ -1744,7 +1744,15 @@ impl SpircTask {
                     &sent_by,
                     transfer.current_session.context.uri.as_deref(),
                 ) {
-                    return self.handle_jam_transfer(transfer).await;
+                    // The host is the Jam's source: following its own Jam
+                    // left no device holding pauses, so they bounced back.
+                    if self.jam_host.is_none() {
+                        return self.handle_jam_transfer(transfer).await;
+                    }
+                    if self.connect_state.is_active() {
+                        log::warn!(target: "librespot_connect::jam", "Host ignored its own Jam's transfer");
+                        return Ok(());
+                    }
                 }
                 self.handle_transfer(transfer)?;
                 return self.notify().await;
@@ -3388,6 +3396,20 @@ mod shuffle_tests {
             SpircPlayStatus::LoadingPlay { .. }
         ));
         assert_eq!(upcoming(&task), tracks()[5..]);
+        task.player.stop();
+    }
+
+    #[tokio::test]
+    async fn a_playing_host_does_not_follow_its_own_jam() {
+        let mut task = task();
+        task.jam_host = Some("jam-session".into());
+        task.handle_activate(true);
+        let now = task.server_now_ms();
+        task.handle_request(jam_transfer(3, 0, false, now))
+            .await
+            .unwrap();
+        assert_ne!(task.devices.jam_phase(), JamPhase::Following);
+        assert!(matches!(task.play_status, SpircPlayStatus::Stopped));
         task.player.stop();
     }
 
