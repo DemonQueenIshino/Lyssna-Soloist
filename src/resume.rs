@@ -27,7 +27,15 @@ pub struct LastPlayed {
     pub queued: Vec<String>,
 }
 
+/// A Spotify song by ID, or a local song by its `spotify:local:` URI.
 fn valid_track(uri: &str) -> bool {
+    if uri.starts_with("spotify:local:") {
+        return uri.len() <= 1_000
+            && matches!(
+                librespot_core::SpotifyUri::from_uri(uri),
+                Ok(librespot_core::SpotifyUri::Local { .. })
+            );
+    }
     uri.strip_prefix("spotify:track:")
         .is_some_and(|id| id.len() == 22 && id.bytes().all(|byte| byte.is_ascii_alphanumeric()))
 }
@@ -395,11 +403,7 @@ fn decode(bytes: &[u8]) -> Option<LastPlayed> {
     value.queued.retain(|uri| valid_track(uri));
     value.queued.truncate(50);
     value.dj_context = value.dj_context.filter(DJContext::valid);
-    value
-        .track
-        .uri
-        .starts_with("spotify:track:")
-        .then_some(value)
+    valid_track(&value.track.uri).then_some(value)
 }
 pub fn newer(local: Option<LastPlayed>, spotify: Option<LastPlayed>) -> Option<LastPlayed> {
     match (local, spotify) {
@@ -415,7 +419,11 @@ pub fn newer(local: Option<LastPlayed>, spotify: Option<LastPlayed>) -> Option<L
     }
 }
 pub fn save(account: &str, playback: &Playback, observed_at: u64, force: bool) -> Result<()> {
-    let Some(track) = playback.item.as_ref().filter(|track| !track.is_local) else {
+    let Some(track) = playback
+        .item
+        .as_ref()
+        .filter(|track| valid_track(&track.uri))
+    else {
         return Ok(());
     };
     let mut saves = SAVES
@@ -466,6 +474,26 @@ pub fn save(account: &str, playback: &Playback, observed_at: u64, force: bool) -
         (track.uri.clone(), playback.is_playing, Instant::now()),
     );
     Ok(())
+}
+#[cfg(test)]
+mod local_tests {
+    use super::*;
+    #[test]
+    fn a_local_song_is_picked_up_again_after_a_restart() {
+        let local = "spotify:local:Jeff+Guo:Prompting+-+Single:Prompting:209";
+        let saved = serde_json::json!({
+            "track": {"uri": local, "name": "Prompting", "is_local": true, "duration_ms": 209000,
+                      "artists": [], "album": {"name": "", "images": []}},
+            "position_ms": 61000,
+            "played_at": 1,
+            "queue": [local, "spotify:track:0123456789abcdefghijkl"],
+        });
+        let value = decode(&serde_json::to_vec(&saved).unwrap()).expect("local song kept");
+        assert_eq!(value.track.uri, local);
+        assert_eq!(value.queue.len(), 2);
+        assert!(!valid_track("spotify:local:a"));
+        assert!(!valid_track("spotify:episode:0123456789abcdefghijkl"));
+    }
 }
 #[cfg(test)]
 mod tests {
