@@ -4,8 +4,9 @@
 //! random key go to `stream-deck.json` in Lyssna's application data; the
 //! plugin reads them and must send the key before anything else. Messages
 //! are one JSON object per line. The plugin sends commands; Lyssna sends
-//! the player state whenever it changes. No Spotify credentials or tokens
-//! ever pass through it.
+//! the player state whenever it changes, and the playing song's synced
+//! lyrics when they arrive. No Spotify credentials or tokens ever pass
+//! through it.
 
 use super::{Command, Desktop, PlayerRequest, lock, player};
 use anyhow::{Context, Result};
@@ -27,6 +28,9 @@ const MAX_LINE: usize = 4096;
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 /// Plugin connections at once; Stream Deck runs one plugin process.
 const MAX_CLIENTS: usize = 8;
+/// Largest lyrics message; past it, word timing is dropped and the lines
+/// highlight whole. The plugin accepts lines up to 1 MB.
+const MAX_LYRICS: usize = 400_000;
 
 /// What the keys and dials show.
 #[derive(Clone, Default, PartialEq, Serialize)]
@@ -56,12 +60,35 @@ struct DeckTrack {
     duration_ms: u64,
 }
 
+/// The playing song's lyrics for the touch strip: synced lines only, as
+/// unsynced lyrics have nothing to follow.
+#[derive(Clone, PartialEq, Serialize)]
+struct DeckLyrics {
+    uri: String,
+    lines: Vec<DeckLine>,
+}
+
+#[derive(Clone, PartialEq, Serialize)]
+struct DeckLine {
+    start_ms: u64,
+    end_ms: u64,
+    text: String,
+    /// The provider's reading for non-Latin lines, when it has one.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    romanization: String,
+    /// Each word's start, end and text; empty for line-timed lyrics.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    words: Vec<(u64, u64, String)>,
+}
+
 #[derive(Default)]
 struct Shared {
     /// Connected plugins, by connection number.
     clients: Vec<(u64, TcpStream)>,
     next_client: u64,
     state: DeckState,
+    /// The lyrics line last sent, so a new plugin gets it on connect.
+    lyrics: String,
     saved: HashMap<String, bool>,
     /// Volume before Mute, to restore.
     unmuted: Option<u8>,
@@ -117,16 +144,24 @@ pub(super) fn start(app: tauri::AppHandle) -> Result<()> {
         let app = app.clone();
         thread::spawn(move || {
             let mut asked = String::new();
+            let mut lyrics_seen = None;
             loop {
                 thread::sleep(Duration::from_millis(250));
                 let Some(desktop) = app.try_state::<Desktop>() else {
                     continue;
                 };
-                let next = {
+                let (next, lyrics) = {
                     let Ok(snapshot) = lock(&desktop.0.snapshot) else {
                         continue;
                     };
-                    read_state(&snapshot)
+                    // Lyrics are rebuilt only when the song or its lyrics
+                    // change, not every poll.
+                    let seen = lyrics_key(&snapshot);
+                    let lyrics = (seen != lyrics_seen).then(|| {
+                        lyrics_seen = seen;
+                        lyrics_line(read_lyrics(&snapshot).as_ref())
+                    });
+                    (read_state(&snapshot), lyrics)
                 };
                 // Ask once per song whether it is in Liked Songs.
                 if let Some(track) = &next.track
@@ -148,7 +183,15 @@ pub(super) fn start(app: tauri::AppHandle) -> Result<()> {
                     .and_then(|track| shared.saved.get(&track.uri).copied());
                 if next != shared.state {
                     shared.state = next;
-                    broadcast(&mut shared);
+                    let line = state_line(&shared.state);
+                    send(&mut shared, &line);
+                }
+                if let Some(line) = lyrics
+                    && line != shared.lyrics
+                {
+                    shared.lyrics = line;
+                    let line = shared.lyrics.clone();
+                    send(&mut shared, &line);
                 }
             }
         });
@@ -216,8 +259,77 @@ fn cover(images: &[crate::model::Artwork]) -> Option<String> {
         .map(|image| image.url.clone())
 }
 
-fn broadcast(shared: &mut Shared) {
-    let line = state_line(&shared.state);
+/// What identifies the lyrics on hand, cheaply: the song, the source and
+/// the line timing.
+fn lyrics_key(snapshot: &super::Snapshot) -> Option<(String, String, usize, u64)> {
+    let track = snapshot.playback.item.as_ref()?;
+    let lyrics = snapshot.lyrics.as_ref()?;
+    Some((
+        track.uri.clone(),
+        lyrics.source.clone(),
+        lyrics.lines.len(),
+        lyrics.lines.iter().map(|line| line.start_ms).sum(),
+    ))
+}
+
+fn read_lyrics(snapshot: &super::Snapshot) -> Option<DeckLyrics> {
+    let track = snapshot.playback.item.as_ref()?;
+    deck_lyrics(&track.uri, snapshot.lyrics.as_ref()?)
+}
+
+/// Synced, sung lines only; background vocals stay off the small strip.
+fn deck_lyrics(uri: &str, lyrics: &crate::lyrics::Lyrics) -> Option<DeckLyrics> {
+    if !lyrics.synced || lyrics.instrumental {
+        return None;
+    }
+    let lines: Vec<DeckLine> = lyrics
+        .lines
+        .iter()
+        .filter(|line| !line.background && !line.text.trim().is_empty())
+        .map(|line| DeckLine {
+            start_ms: line.start_ms,
+            end_ms: line.end_ms,
+            text: line.text.clone(),
+            romanization: line.romanization.clone(),
+            words: line
+                .words
+                .iter()
+                .map(|word| (word.start_ms, word.end_ms, word.text.clone()))
+                .collect(),
+        })
+        .collect();
+    (!lines.is_empty()).then(|| DeckLyrics {
+        uri: uri.to_owned(),
+        lines,
+    })
+}
+
+/// The lyrics message; null when the song has none to follow.
+fn lyrics_line(lyrics: Option<&DeckLyrics>) -> String {
+    let line = format!("{}\n", json!({"type": "lyrics", "lyrics": lyrics}));
+    if line.len() <= MAX_LYRICS {
+        return line;
+    }
+    let lines = lyrics.map(|lyrics| DeckLyrics {
+        uri: lyrics.uri.clone(),
+        lines: lyrics
+            .lines
+            .iter()
+            .map(|line| DeckLine {
+                words: Vec::new(),
+                ..line.clone()
+            })
+            .collect(),
+    });
+    let line = format!("{}\n", json!({"type": "lyrics", "lyrics": lines}));
+    if line.len() <= MAX_LYRICS {
+        line
+    } else {
+        format!("{}\n", json!({"type": "lyrics", "lyrics": null}))
+    }
+}
+
+fn send(shared: &mut Shared, line: &str) {
     shared
         .clients
         .retain_mut(|(_, client)| client.write_all(line.as_bytes()).is_ok());
@@ -256,6 +368,9 @@ fn serve(
         );
         let mut writer = stream.try_clone()?;
         writer.write_all(state_line(&shared.state).as_bytes())?;
+        if !shared.lyrics.is_empty() {
+            writer.write_all(shared.lyrics.as_bytes())?;
+        }
         shared.next_client += 1;
         let id = shared.next_client;
         shared.clients.push((id, writer));
@@ -443,6 +558,61 @@ mod tests {
         // A quiet spell longer than the deadline must not end the connection.
         assert_eq!(read_line(&mut reader).unwrap(), "still here");
         client.join().unwrap();
+    }
+
+    fn timed(text: &str, start_ms: u64, background: bool) -> crate::lyrics::Line {
+        crate::lyrics::Line {
+            start_ms,
+            end_ms: start_ms + 1000,
+            text: text.into(),
+            words: vec![crate::lyrics::Word {
+                start_ms,
+                end_ms: start_ms + 1000,
+                text: text.into(),
+            }],
+            background,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_strip_gets_synced_sung_lines_only() {
+        let mut lyrics = crate::lyrics::Lyrics {
+            lines: vec![
+                timed("first", 0, false),
+                timed("(echo)", 500, true),
+                timed("  ", 900, false),
+                timed("second", 1000, false),
+            ],
+            synced: true,
+            ..Default::default()
+        };
+        let deck = deck_lyrics("spotify:track:a", &lyrics).unwrap();
+        let texts: Vec<_> = deck.lines.iter().map(|line| line.text.as_str()).collect();
+        assert_eq!(texts, ["first", "second"]);
+        assert_eq!(deck.lines[1].words, [(1000, 2000, "second".into())]);
+        lyrics.synced = false;
+        assert!(deck_lyrics("spotify:track:a", &lyrics).is_none());
+        assert_eq!(lyrics_line(None), "{\"lyrics\":null,\"type\":\"lyrics\"}\n");
+    }
+
+    #[test]
+    fn huge_lyrics_drop_word_timing_first() {
+        let line = DeckLine {
+            start_ms: 0,
+            end_ms: 1,
+            text: "la".into(),
+            romanization: String::new(),
+            words: vec![(0, 1, "x".repeat(1000)); 10],
+        };
+        let lyrics = DeckLyrics {
+            uri: "spotify:track:a".into(),
+            lines: vec![line; 50],
+        };
+        let sent = lyrics_line(Some(&lyrics));
+        assert!(sent.len() <= MAX_LYRICS);
+        assert!(sent.contains("\"text\":\"la\""));
+        assert!(!sent.contains("words"));
     }
 
     #[test]
