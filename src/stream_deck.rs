@@ -79,6 +79,12 @@ struct DeckLine {
     /// Each word's start, end and text; empty for line-timed lyrics.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     words: Vec<(u64, u64, String)>,
+    /// Background vocals, shown smaller under the line they echo.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    background: bool,
+    /// The other singer in a duet, aligned to the right.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    opposite: bool,
 }
 
 #[derive(Default)]
@@ -277,7 +283,8 @@ fn read_lyrics(snapshot: &super::Snapshot) -> Option<DeckLyrics> {
     deck_lyrics(&track.uri, snapshot.lyrics.as_ref()?)
 }
 
-/// Synced, sung lines only; background vocals stay off the small strip.
+/// Synced lines with words to show, background vocals and duet sides
+/// included.
 fn deck_lyrics(uri: &str, lyrics: &crate::lyrics::Lyrics) -> Option<DeckLyrics> {
     if !lyrics.synced || lyrics.instrumental {
         return None;
@@ -285,7 +292,7 @@ fn deck_lyrics(uri: &str, lyrics: &crate::lyrics::Lyrics) -> Option<DeckLyrics> 
     let lines: Vec<DeckLine> = lyrics
         .lines
         .iter()
-        .filter(|line| !line.background && !line.text.trim().is_empty())
+        .filter(|line| !line.text.trim().is_empty())
         .map(|line| DeckLine {
             start_ms: line.start_ms,
             end_ms: line.end_ms,
@@ -296,6 +303,8 @@ fn deck_lyrics(uri: &str, lyrics: &crate::lyrics::Lyrics) -> Option<DeckLyrics> 
                 .iter()
                 .map(|word| (word.start_ms, word.end_ms, word.text.clone()))
                 .collect(),
+            background: line.background,
+            opposite: line.opposite,
         })
         .collect();
     (!lines.is_empty()).then(|| DeckLyrics {
@@ -576,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn the_strip_gets_synced_sung_lines_only() {
+    fn the_strip_gets_synced_lines_with_their_singers() {
         let mut lyrics = crate::lyrics::Lyrics {
             lines: vec![
                 timed("first", 0, false),
@@ -587,10 +596,16 @@ mod tests {
             synced: true,
             ..Default::default()
         };
+        lyrics.lines[3].opposite = true;
         let deck = deck_lyrics("spotify:track:a", &lyrics).unwrap();
         let texts: Vec<_> = deck.lines.iter().map(|line| line.text.as_str()).collect();
-        assert_eq!(texts, ["first", "second"]);
-        assert_eq!(deck.lines[1].words, [(1000, 2000, "second".into())]);
+        assert_eq!(texts, ["first", "(echo)", "second"]);
+        assert!(deck.lines[1].background && !deck.lines[1].opposite);
+        assert!(deck.lines[2].opposite && !deck.lines[2].background);
+        let sent = lyrics_line(Some(&deck));
+        assert_eq!(sent.matches("\"background\":true").count(), 1);
+        assert_eq!(sent.matches("\"opposite\":true").count(), 1);
+        assert_eq!(deck.lines[2].words, [(1000, 2000, "second".into())]);
         lyrics.synced = false;
         assert!(deck_lyrics("spotify:track:a", &lyrics).is_none());
         assert_eq!(lyrics_line(None), "{\"lyrics\":null,\"type\":\"lyrics\"}\n");
@@ -604,6 +619,8 @@ mod tests {
             text: "la".into(),
             romanization: String::new(),
             words: vec![(0, 1, "x".repeat(1000)); 10],
+            background: false,
+            opposite: false,
         };
         let lyrics = DeckLyrics {
             uri: "spotify:track:a".into(),
