@@ -52,6 +52,15 @@ pub fn supports(uri: &str) -> bool {
 
 /// Collection set holding this kind of item.
 fn set_for(uri: &str) -> Option<&'static str> {
+    // Local songs are liked by their `spotify:local:` URI, as in Spotify.
+    if uri.starts_with("spotify:local:") {
+        return (uri.len() <= 1_000
+            && matches!(
+                librespot_core::SpotifyUri::from_uri(uri),
+                Ok(librespot_core::SpotifyUri::Local { .. })
+            ))
+        .then_some("collection");
+    }
     let (kind, id) = uri.strip_prefix("spotify:")?.split_once(':')?;
     if id.len() != 22 || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
         return None;
@@ -348,7 +357,8 @@ mod tests {
         );
         assert_eq!(set_for("spotify:playlist:0123456789abcdefghijkl"), None);
         assert_eq!(set_for("spotify:track:short"), None);
-        assert_eq!(set_for("spotify:local:a:b:c:1"), None);
+        assert_eq!(set_for("spotify:local:a:b:c:1"), Some("collection"));
+        assert_eq!(set_for("spotify:local:a:b"), None);
     }
     #[test]
     fn page_and_delta_decode_items_tokens_and_removals() {

@@ -910,6 +910,7 @@ impl Spirc {
             uri,
             SpotifyUri::Track { .. }
                 | SpotifyUri::Episode { .. }
+                | SpotifyUri::Local { .. }
                 | SpotifyUri::Album { .. }
                 | SpotifyUri::Playlist { .. }
         ) {
@@ -2633,7 +2634,9 @@ impl SpircTask {
 
     async fn handle_add_to_queue(&mut self, uri: SpotifyUri) {
         let track_uris: Vec<String> = match uri {
-            SpotifyUri::Track { .. } | SpotifyUri::Episode { .. } => vec![uri.to_uri()],
+            SpotifyUri::Track { .. } | SpotifyUri::Episode { .. } | SpotifyUri::Local { .. } => {
+                vec![uri.to_uri()]
+            }
             SpotifyUri::Album { .. } | SpotifyUri::Playlist { .. } => {
                 match self.session.spclient().get_context(&uri.to_uri()).await {
                     Ok(context) => context

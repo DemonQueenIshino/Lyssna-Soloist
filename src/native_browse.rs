@@ -1594,6 +1594,8 @@ pub(crate) async fn resolve_tracks(session: &Session, uris: &[String]) -> Result
         // Batch misses (rare) and non-song items fall back to one request each.
         singles += 1;
         let track = match SpotifyUri::from_uri(uri) {
+            // Spotify knows nothing of local songs; the folder scan does.
+            Ok(SpotifyUri::Local { .. }) => None,
             Ok(id) => tokio::time::timeout(
                 Duration::from_secs(6),
                 librespot_metadata::Track::get(session, &id),
