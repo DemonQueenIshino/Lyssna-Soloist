@@ -596,7 +596,7 @@ mod dj_tests {
         let uris: Vec<_> = ctx.tracks.iter().map(|t| t.uri.clone()).collect();
         assert_eq!(uris.len(), 8);
         assert_eq!(
-            ctx.tracks.last().and_then(|t| t.get_context_index()),
+            ctx.tracks.last().and_then(Metadata::get_context_index),
             Some(7)
         );
         // A session stuck on one set stops being asked after a few tries.
