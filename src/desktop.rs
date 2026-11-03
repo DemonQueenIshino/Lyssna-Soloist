@@ -4343,6 +4343,7 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
             }
             "quit" => app.exit(0),
             action @ ("toggle" | "next" | "previous") => {
+                crate::native::diagnostic(&format!("media control {action} from the tray"));
                 let _ = app.emit(
                     "lyssna",
                     json!({"type":"media_control","action":action,"position_ms":null}),
@@ -4558,6 +4559,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     crate::media::MediaAction::Seek(position) => Some(position),
                     _ => None,
                 };
+                // Media keys, headsets and the Windows flyout land here.
+                crate::native::diagnostic(&format!("media control {}", action.name()));
                 let _ = handle.emit(
                     "lyssna",
                     json!({"type":"media_control","action":action.name(),"position_ms":position}),

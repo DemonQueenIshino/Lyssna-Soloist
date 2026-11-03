@@ -489,6 +489,7 @@ fn run(app: &tauri::AppHandle, shared: &Mutex<Shared>, name: &str, message: &Val
         }
         _ => anyhow::bail!("Unknown Stream Deck command"),
     };
+    crate::native::diagnostic(&format!("stream deck {name}"));
     let request: PlayerRequest = serde_json::from_value(request)?;
     player(app.clone(), request, None, desktop).map_err(anyhow::Error::msg)
 }
