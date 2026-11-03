@@ -7,13 +7,20 @@ pub(crate) struct PlaybackIntent {
     target: Option<String>,
     desired: Option<bool>,
     waiting: Option<(bool, Instant)>,
+    /// Resends while audio already does what was wanted, as when a skip
+    /// lands on a different song than the one awaited.
+    matched_retries: u8,
 }
+/// Resends of a choice audio already matches before giving up on it.
+const MAX_MATCHED_RETRIES: u8 = 3;
 impl PlaybackIntent {
     pub fn request(&mut self, playing: bool) {
+        self.matched_retries = 0;
         self.continuing = playing;
         self.desired = Some(playing);
     }
     pub fn loading(&mut self, now: Instant) {
+        self.matched_retries = 0;
         self.continuing = true;
         self.target = None;
         self.desired = Some(true);
@@ -62,6 +69,13 @@ impl PlaybackIntent {
         if !retry && wanted == playing {
             self.desired = None;
             return None;
+        }
+        if retry && wanted == playing {
+            self.matched_retries += 1;
+            if self.matched_retries > MAX_MATCHED_RETRIES {
+                self.reset();
+                return None;
+            }
         }
         self.waiting = Some((wanted, now));
         Some(wanted)
@@ -201,6 +215,17 @@ mod tests {
         assert_eq!(intent.next(false, now), None);
         intent.acknowledge(true);
         assert_eq!(intent.next(true, now), Some(false));
+    }
+    #[test]
+    fn a_skip_past_the_awaited_song_stops_resending_play() {
+        let now = Instant::now();
+        let mut intent = PlaybackIntent::default();
+        intent.loading_track(Some("skipped".into()), now);
+        intent.acknowledge_track("landed", true);
+        let sent = (1..30)
+            .filter_map(|second| intent.next(true, now + Duration::from_secs(second * 2)))
+            .count();
+        assert_eq!(sent, 3);
     }
     #[test]
     fn late_command_is_followed_by_latest_intent_even_if_state_already_matches() {
