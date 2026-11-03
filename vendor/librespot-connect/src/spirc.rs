@@ -120,6 +120,8 @@ struct SpircTask {
     jam_has_guests: bool,
     /// The active device's capabilities as last logged.
     jam_device_logged: String,
+    /// The active device last written to the diagnostics log.
+    active_device_logged: String,
 
     /// when set to true, it will update the volume after [VOLUME_UPDATE_DELAY],
     /// when no other future resolves, otherwise resets the delay
@@ -537,6 +539,11 @@ const UPDATE_STATE_DELAY: Duration = Duration::from_millis(200);
 /// The context metadata entry naming the Jam a state belongs to.
 const JAM_SESSION_KEY: &str = "jam-session-id";
 /// Marks a requested DJ queue; the pre-rename `spotiflex.dj_request` key is still accepted.
+/// A device ID cut short for the diagnostics log.
+fn short_device(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
+
 fn is_dj_request(metadata: &std::collections::HashMap<String, String>) -> bool {
     metadata.contains_key("lyssna.dj_request") || metadata.contains_key("spotiflex.dj_request")
 }
@@ -760,6 +767,7 @@ impl Spirc {
             jam_session_seen: None,
             jam_has_guests: false,
             jam_device_logged: String::new(),
+            active_device_logged: String::new(),
             update_volume: false,
             update_state: false,
 
@@ -1045,7 +1053,15 @@ impl SpircTask {
                 volume_update = self.connect_state_volume_update.next() => unwrap! {
                     volume_update,
                     match |volume_update| match volume_update.volume.try_into() {
-                        Ok(volume) => self.set_volume(volume),
+                        Ok(volume) => {
+                            log::warn!(
+                                target: "librespot_connect::devices",
+                                "remote volume {}%, we are active: {}",
+                                u32::from(volume) * 100 / u32::from(u16::MAX),
+                                self.connect_state.is_active()
+                            );
+                            self.set_volume(volume)
+                        }
                         Err(why) => error!("can't update volume, failed to parse i32 to u16: {why}")
                     }
                 },
@@ -1592,6 +1608,19 @@ impl SpircTask {
 
         if let Some(cluster) = cluster_update.cluster.take() {
             self.devices.update(&cluster);
+            // Which device Spotify says is playing, each time it changes, to
+            // diagnose copies on other computers taking over.
+            if cluster.active_device_id != self.active_device_logged {
+                let mine = cluster.active_device_id == self.session.device_id();
+                log::warn!(
+                    target: "librespot_connect::devices",
+                    "active device now {} ({}), reason {reason:?}, we were active: {}",
+                    short_device(&cluster.active_device_id),
+                    if mine { "this computer" } else { "another device" },
+                    self.connect_state.is_active()
+                );
+                self.active_device_logged = cluster.active_device_id.clone();
+            }
             // Another device playing, such as Spotify's app hosting a Jam:
             // what its state tells the Jam service, to compare with ours.
             if cluster.active_device_id != self.session.device_id()
@@ -1676,6 +1705,13 @@ impl SpircTask {
         use Command::*;
 
         let sent_by = request.sent_by_device_id;
+        log::warn!(
+            target: "librespot_connect::devices",
+            "remote {} from {}, we are active: {}",
+            request.command,
+            short_device(&sent_by),
+            self.connect_state.is_active()
+        );
         match request.command {
             // errors and unknown commands
             Transfer(transfer) if transfer.data.is_none() => {
@@ -3139,6 +3175,7 @@ mod shuffle_tests {
             jam_session_seen: None,
             jam_has_guests: false,
             jam_device_logged: String::new(),
+            active_device_logged: String::new(),
             update_volume: false,
             update_state: false,
             spirc_id: 0,

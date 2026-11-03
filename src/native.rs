@@ -973,6 +973,7 @@ fn command_kind(action: &PlayerAction) -> Option<&'static str> {
         PlayerAction::Resume { .. } => "resume",
         PlayerAction::RestoreDJ { .. } => "restore-dj",
         PlayerAction::PreparedDJ { .. } => "dj",
+        PlayerAction::Enqueue(_) => "enqueue",
         _ => return None,
     })
 }
@@ -2473,6 +2474,10 @@ async fn run(
                             && let Ok(mut queue) = queue_snapshot.lock()
                         {
                             *queue = Some(next_tracks.iter().take(50).map(|track| QueueEntry { uri: track.uri.clone(), added: track.provider == "queue" }).collect());
+                        }
+                        if let PlayerEvent::SetQueue { next_tracks, .. } = &event {
+                            let queued = next_tracks.iter().filter(|track| track.provider == "queue").count();
+                            diagnostic(&format!("event set-queue {} next, {queued} queued", next_tracks.len()));
                         }
                         if let PlayerEvent::SetQueue { context_uri, .. } = &event {
                             ordered = is_dj_context(context_uri);
