@@ -216,6 +216,9 @@ fn random_hex() -> Result<String> {
 /// A playback command as a Jam's members send it to the Jam, which passes it
 /// on to everyone in it, as Spotify's apps do. Volume and moving playback
 /// between devices stay with each device; `None` for those.
+const LISTED_BEFORE: usize = 50;
+const LISTED_SONGS: usize = 1000;
+
 pub(crate) fn jam_command(action: &PlayerAction) -> Option<Value> {
     let mut command = match action {
         // Songs from a playlist or album start in it, so the Jam plays on
@@ -227,11 +230,21 @@ pub(crate) fn jam_command(action: &PlayerAction) -> Option<Value> {
         } => {
             let track = uris.get(*offset)?;
             valid_track(track).ok()?;
-            command_body(&PlayerAction::PlayContext {
+            let mut command = command_body(&PlayerAction::PlayContext {
                 context: context.clone(),
                 offset: Some(track.clone()),
             })
-            .ok()?
+            .ok()?;
+            // The list's own order, such as a Random sort, for a Lyssna host.
+            // A window of it keeps the command small.
+            let start = offset.saturating_sub(LISTED_BEFORE);
+            let end = (start + LISTED_SONGS).min(uris.len());
+            command["context"]["metadata"][librespot_connect::LISTED_CONTEXT] = json!("true");
+            command["context"]["pages"] = json!([{
+                "tracks": uris[start..end].iter().map(|uri| json!({"uri": uri})).collect::<Vec<_>>()
+            }]);
+            command["options"]["skip_to"]["track_index"] = json!(offset - start);
+            command
         }
         PlayerAction::Volume(_) => return None,
         action => command_body(action).ok()?,
@@ -454,6 +467,28 @@ mod tests {
         assert_eq!(play["endpoint"], "play");
         assert_eq!(play["context"]["uri"], "spotify:playlist:abc");
         assert_eq!(play["options"]["skip_to"]["track_uri"], track);
+        // A Lyssna host keeps the list's order, such as a Random sort.
+        assert_eq!(play["context"]["metadata"]["lyssna.listed"], "true");
+        assert_eq!(play["context"]["pages"][0]["tracks"][1]["uri"], track);
+        assert_eq!(play["options"]["skip_to"]["track_index"], 1);
+    }
+
+    #[test]
+    fn a_long_listed_jam_play_sends_a_window_around_the_song() {
+        let uris: Vec<String> = (0..3000)
+            .map(|index| format!("spotify:track:{index:022}"))
+            .collect();
+        let play = jam_command(&PlayerAction::PlayUris {
+            uris: uris.clone(),
+            offset: 2000,
+            context: Some("spotify:playlist:abc".into()),
+        })
+        .unwrap();
+        let tracks = play["context"]["pages"][0]["tracks"].as_array().unwrap();
+        assert_eq!(tracks.len(), LISTED_SONGS);
+        let index = play["options"]["skip_to"]["track_index"].as_u64().unwrap() as usize;
+        assert_eq!(index, LISTED_BEFORE);
+        assert_eq!(tracks[index]["uri"], uris[2000]);
     }
 
     #[test]

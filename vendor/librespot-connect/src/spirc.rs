@@ -1792,17 +1792,41 @@ impl SpircTask {
                     .and_then(|s| s.track_index)
                     .map(|i| i as usize);
 
+                let prepared_context = match &context {
+                    PlayContext::Uri(uri)
+                        if !play.context.pages.is_empty()
+                            && play
+                                .context
+                                .metadata
+                                .get(crate::LISTED_CONTEXT)
+                                .is_some_and(|listed| listed == "true") =>
+                    {
+                        Some(Box::new(Context {
+                            uri: Some(uri.clone()),
+                            pages: std::mem::take(&mut play.context.pages),
+                            ..Default::default()
+                        }))
+                    }
+                    _ => None,
+                };
+                let playing_track = match fallback_index {
+                    Some(index) if prepared_context.is_some() => {
+                        Some(PlayingTrack::Index(index as u32))
+                    }
+                    _ => play.options.skip_to.and_then(|s| s.try_into().ok()),
+                };
+
                 self.handle_load(
                     LoadRequest {
                         context,
                         options: LoadRequestOptions {
                             page_provider: None,
-                            prepared_context: None,
+                            prepared_context,
                             session_url: None,
                             relative_offset: 0,
                             start_playing: true,
                             seek_to: play.options.seek_to.unwrap_or_default(),
-                            playing_track: play.options.skip_to.and_then(|s| s.try_into().ok()),
+                            playing_track,
                             context_options,
                         },
                     },
@@ -3519,6 +3543,37 @@ mod shuffle_tests {
         let upcoming = next(&task);
         assert_eq!(upcoming[0].uid, "q8");
         assert!(upcoming.iter().all(|t| t.uid != "q7"));
+        task.player.stop();
+    }
+
+    #[tokio::test]
+    async fn a_listed_play_keeps_its_own_order() {
+        let mut task = task();
+        let order: Vec<String> = tracks().iter().rev().cloned().collect();
+        let playlist = "spotify:playlist:37i9dQZF1DXcBWIGoYBM5M";
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "message_id": 3,
+            "sent_by_device_id": "social-connect-0123abcd",
+            "command": {
+                "endpoint": "play",
+                "context": {
+                    "uri": playlist,
+                    "url": format!("context://{playlist}"),
+                    "metadata": {crate::LISTED_CONTEXT: "true"},
+                    "pages": [{"tracks": order.iter().map(|uri| serde_json::json!({"uri": uri})).collect::<Vec<_>>()}],
+                },
+                "options": {"skip_to": {"track_index": 2, "track_uri": order[2]}},
+                "play_origin": {"feature_identifier": "lyssna"},
+            },
+        }))
+        .unwrap();
+        task.handle_request(request).await.unwrap();
+        assert_eq!(task.connect_state.context_uri(), playlist);
+        assert_eq!(
+            task.connect_state.current_track(|track| track.uri.clone()),
+            order[2]
+        );
+        assert_eq!(upcoming(&task)[..3], order[3..6]);
         task.player.stop();
     }
 
