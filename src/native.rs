@@ -957,6 +957,8 @@ fn preload_selection(action: &PlayerAction) -> Option<(librespot_core::SpotifyUr
 
 /// How long a selection may take to start loading before Play gives up on it.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a left DJ session may take to load before DJ starts fresh.
+const DJ_RESUME_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Transport commands for the local player diagnostics log.
 fn command_kind(action: &PlayerAction) -> Option<&'static str> {
@@ -1299,6 +1301,7 @@ fn load_request(action: &PlayerAction, modes: &PlayModes) -> Option<LoadRequest>
             track_uid,
             position_ms,
             relative_offset,
+            ..
         } => LoadRequest::from_context_uri(
             context.clone(),
             LoadRequestOptions {
@@ -2412,6 +2415,7 @@ async fn run(
     let mut connection_lost = false;
     // A load Spotify Connect never starts would leave Play doing nothing.
     let mut load_due: Option<std::time::Instant> = None;
+    let mut dj_fallback = false;
     loop {
         tokio::select! {
             prepared = &mut resume_preparation, if !resume_prepared => {
@@ -2457,7 +2461,10 @@ async fn run(
                     }
                     intent.request(matches!(action,PlayerAction::Play(None)));
                 }else{
-                if matches!(action,PlayerAction::Play(Some(_))|PlayerAction::PreparedDJ{..}|PlayerAction::PlayUris{..}|PlayerAction::Resume{..}|PlayerAction::PlayContext{..}|PlayerAction::RestoreDJ{..}){paused_position=None;intent.loading_track(selected_track(&action),std::time::Instant::now());load_due=Some(std::time::Instant::now()+LOAD_TIMEOUT);}
+                if matches!(action,PlayerAction::Play(Some(_))|PlayerAction::PreparedDJ{..}|PlayerAction::PlayUris{..}|PlayerAction::Resume{..}|PlayerAction::PlayContext{..}|PlayerAction::RestoreDJ{..}){paused_position=None;intent.loading_track(selected_track(&action),std::time::Instant::now());load_due=Some(std::time::Instant::now()+LOAD_TIMEOUT);dj_fallback=false;}
+                // A left DJ session gets a shorter wait; a fresh DJ follows if
+                // Spotify no longer loads it.
+                if let PlayerAction::RestoreDJ{fresh_on_failure:true,..}=&action{dj_fallback=true;load_due=Some(std::time::Instant::now()+DJ_RESUME_TIMEOUT);}
                 if let PlayerAction::Volume(volume)=&action{mixer.set_volume((u32::from((*volume).min(100))*u32::from(u16::MAX)/100)as u16);emit(NativeEvent::Transport{shuffle:None,repeat:None,volume:Some((*volume).min(100))});}
                 let before=modes.clone();
                 if apply_control(&spirc, action, &mut active, &mut modes, &mut ordered).is_err() {loaded.store(false,Ordering::Release);intent.reset(); emit(NativeEvent::ControlError("Native playback command failed. Reconnect native audio in Settings.".into())); }
@@ -2482,7 +2489,7 @@ async fn run(
                         remember_player_queue(account,event);
                         emit(NativeEvent::QueueChanged);
                     },
-                    Some(PlayerEvent::Loading{track_id,..})=>{load_due=None;unavailable.track(&track_id.to_uri());loaded.store(true,Ordering::Release);if !jam_following{intent.track_loading(track_id.to_uri(),std::time::Instant::now());}},
+                    Some(PlayerEvent::Loading{track_id,..})=>{load_due=None;dj_fallback=false;unavailable.track(&track_id.to_uri());loaded.store(true,Ordering::Release);if !jam_following{intent.track_loading(track_id.to_uri(),std::time::Instant::now());}},
                     Some(PlayerEvent::ShuffleChanged{shuffle})=>{
                         emit(NativeEvent::Transport{shuffle:Some(shuffle),repeat:None,volume:None});
                         // Another Spotify app changed it, or a load applied it.
@@ -2498,7 +2505,7 @@ async fn run(
                     Some(PlayerEvent::SessionConnected { .. }) => active = true,
                     Some(PlayerEvent::SessionDisconnected { .. }) => {active=false;paused_position=None;loaded.store(false,Ordering::Release);},
                     Some(PlayerEvent::Stopped{..})=>{loaded.store(false,Ordering::Release);audio_playing=false;paused_position=None;intent.reset();emit(NativeEvent::Stopped);},
-                    Some(event @ PlayerEvent::TrackChanged { .. }) => {load_due=None;loaded.store(true,Ordering::Release);pending_seek=None;paused_position=None;if let Some(track)=public_track_change(&event) {if !jam_following{intent.track_loading(track.uri.clone(),std::time::Instant::now());} emit(NativeEvent::Track(Box::new(track))); } },
+                    Some(event @ PlayerEvent::TrackChanged { .. }) => {load_due=None;dj_fallback=false;loaded.store(true,Ordering::Release);pending_seek=None;paused_position=None;if let Some(track)=public_track_change(&event) {if !jam_following{intent.track_loading(track.uri.clone(),std::time::Instant::now());} emit(NativeEvent::Track(Box::new(track))); } },
                     Some(PlayerEvent::Playing { track_id, position_ms, .. }) => {
                         let uri = track_id.to_uri();
                         unavailable.playing(&uri);
@@ -2530,6 +2537,24 @@ async fn run(
             }
         }
         let now = std::time::Instant::now();
+        if load_due.is_some_and(|due| now >= due) && dj_fallback {
+            dj_fallback = false;
+            diagnostic("left DJ session did not load; starting DJ fresh");
+            crate::resume::forget_dj(account);
+            load_due = Some(now + LOAD_TIMEOUT);
+            let fresh = PlayerAction::PlayContext {
+                context: crate::home::DJ_URI.into(),
+                offset: None,
+            };
+            if apply_control(&spirc, fresh, &mut active, &mut modes, &mut ordered).is_err() {
+                load_due = None;
+                loaded.store(false, Ordering::Release);
+                intent.reset();
+                emit(NativeEvent::ControlError(
+                    "Spotify didn't start that. Press Play to try again.".into(),
+                ));
+            }
+        }
         if load_due.is_some_and(|due| now >= due) {
             load_due = None;
             diagnostic("load never started");
@@ -2821,6 +2846,7 @@ mod tests {
                 track_uid: None,
                 position_ms: 0,
                 relative_offset: 0,
+                fresh_on_failure: false,
             },
         ] {
             assert!(
