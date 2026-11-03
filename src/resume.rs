@@ -202,89 +202,6 @@ pub fn restore_dj_action(
             0
         },
         relative_offset,
-        fresh_on_failure: false,
-    })
-}
-/// Where DJ was left: kept apart from the last song, so playing something
-/// else and coming back to DJ carries on in the same session instead of
-/// starting over.
-#[derive(Clone, Deserialize, Serialize)]
-struct DJSpot {
-    context: DJContext,
-    track: String,
-    position_ms: u64,
-    duration_ms: u64,
-    saved_at: u64,
-}
-/// How long a left DJ session is picked up again; after that DJ starts
-/// fresh, as Spotify's sessions don't last for ever.
-const DJ_KEEP_MS: u64 = 24 * 60 * 60 * 1000;
-static DJ_SPOTS: LazyLock<Mutex<HashMap<String, DJSpot>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-fn dj_path(account: &str) -> Result<std::path::PathBuf> {
-    anyhow::ensure!(!cfg!(test), "Not saved in tests");
-    Ok(path(account)?.with_extension("dj.json"))
-}
-fn remember_dj_spot(account: &str, spot: DJSpot) {
-    if let Ok(mut spots) = DJ_SPOTS.lock() {
-        spots.insert(account.into(), spot.clone());
-    }
-    if let Ok(path) = dj_path(account) {
-        let _ = std::fs::create_dir_all(path.parent().unwrap()).and_then(|()| {
-            let temporary = path.with_extension("tmp");
-            std::fs::write(&temporary, serde_json::to_vec(&spot)?)?;
-            std::fs::rename(temporary, &path)
-        });
-    }
-}
-/// Forgets where DJ was left, as when Spotify no longer loads the session.
-pub fn forget_dj(account: &str) {
-    if let Ok(mut spots) = DJ_SPOTS.lock() {
-        spots.remove(account);
-    }
-    if let Ok(path) = dj_path(account) {
-        let _ = std::fs::remove_file(path);
-    }
-}
-fn dj_spot(account: &str) -> Option<DJSpot> {
-    if let Some(spot) = DJ_SPOTS.lock().ok()?.get(account).cloned() {
-        return Some(spot);
-    }
-    let path = dj_path(account).ok()?;
-    if std::fs::metadata(&path).ok()?.len() > 64_000 {
-        return None;
-    }
-    let spot: DJSpot = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    if let Ok(mut spots) = DJ_SPOTS.lock() {
-        spots.insert(account.into(), spot.clone());
-    }
-    Some(spot)
-}
-/// Whether `track` is playing from DJ right now.
-pub fn playing_dj(account: &str, track: &str) -> bool {
-    dj_context(account, track).is_some()
-}
-/// The DJ button: carry on the session DJ was left in, at the same song and
-/// place, or the next song when that one had all but finished. None when
-/// there is no recent session, so DJ starts fresh.
-pub fn resume_dj(account: &str, now: u64) -> Option<crate::api::PlayerAction> {
-    let spot = dj_spot(account)?;
-    let usable = spot.context.valid()
-        && spot.context.session_url.is_some()
-        && valid_track(&spot.track)
-        && now.saturating_sub(spot.saved_at) < DJ_KEEP_MS;
-    if !usable {
-        return None;
-    }
-    let done = spot.duration_ms > 0 && spot.position_ms + 5_000 >= spot.duration_ms;
-    Some(crate::api::PlayerAction::RestoreDJ {
-        context: spot.context.uri,
-        session_url: spot.context.session_url,
-        track: spot.track,
-        track_uid: spot.context.track_uid,
-        position_ms: if done { 0 } else { spot.position_ms },
-        relative_offset: i32::from(done),
-        fresh_on_failure: true,
     })
 }
 static QUEUES: LazyLock<Mutex<HashMap<String, Vec<String>>>> =
@@ -539,18 +456,6 @@ pub fn save(account: &str, playback: &Playback, observed_at: u64, force: bool) -
         context: saved_context(account).0,
         queued: saved_context(account).1,
     };
-    if let Some(context) = &value.dj_context {
-        remember_dj_spot(
-            account,
-            DJSpot {
-                context: context.clone(),
-                track: track.uri.clone(),
-                position_ms,
-                duration_ms: track.duration_ms,
-                saved_at: now,
-            },
-        );
-    }
     let path = path(account)?;
     std::fs::create_dir_all(path.parent().unwrap())?;
     let temporary = path.with_extension("tmp");
@@ -594,50 +499,6 @@ mod tests {
     }
     use super::*;
     #[test]
-    fn the_dj_button_carries_on_a_left_session() {
-        let account = "test-dj-left";
-        let now = 1_000_000_000;
-        assert!(resume_dj(account, now).is_none());
-        let spot = |position_ms, saved_at| DJSpot {
-            context: DJContext {
-                uri: crate::home::DJ_URI.into(),
-                session_url: Some("hm://lexicon-session-provider/context-resolve/left".into()),
-                track_uid: Some("uid-7".into()),
-            },
-            track: "spotify:track:abcdefghijklmnopqrstuv".into(),
-            position_ms,
-            duration_ms: 200_000,
-            saved_at,
-        };
-        remember_dj_spot(account, spot(77_000, now - 60_000));
-        assert!(matches!(
-            resume_dj(account, now),
-            Some(crate::api::PlayerAction::RestoreDJ {
-                position_ms: 77_000,
-                relative_offset: 0,
-                fresh_on_failure: true,
-                track_uid: Some(ref uid),
-                ..
-            }) if uid == "uid-7"
-        ));
-        // A song that had all but finished moves on to the next one.
-        remember_dj_spot(account, spot(197_000, now));
-        assert!(matches!(
-            resume_dj(account, now),
-            Some(crate::api::PlayerAction::RestoreDJ {
-                position_ms: 0,
-                relative_offset: 1,
-                ..
-            })
-        ));
-        // A day-old session starts DJ fresh, as does a forgotten one.
-        remember_dj_spot(account, spot(77_000, now - DJ_KEEP_MS));
-        assert!(resume_dj(account, now).is_none());
-        remember_dj_spot(account, spot(77_000, now));
-        forget_dj(account);
-        assert!(resume_dj(account, now).is_none());
-    }
-    #[test]
     fn reopening_dj_restores_session_position_and_can_skip_without_refresh() {
         let account = "test-dj-reopen";
         let uri = "spotify:track:abcdefghijklmnopqrstuv";
@@ -674,7 +535,6 @@ mod tests {
             Some(crate::api::PlayerAction::RestoreDJ {
                 position_ms: 0,
                 relative_offset: 0,
-                fresh_on_failure: false,
                 ..
             })
         ));

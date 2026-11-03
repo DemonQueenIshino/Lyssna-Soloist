@@ -2056,20 +2056,6 @@ fn player(
             });
             return Ok(());
         }
-        // DJ picks up the session it was left in, after other music or a
-        // restart, unless DJ is what is playing now.
-        if local
-            && matches!(&action, PlayerAction::PlayContext { context, offset: None } if context == crate::home::DJ_URI)
-            && let Some(profile) = snapshot.profile.as_ref()
-            && !snapshot
-                .playback
-                .item
-                .as_ref()
-                .is_some_and(|track| crate::resume::playing_dj(&profile.id, &track.uri))
-            && let Some(resumed) = crate::resume::resume_dj(&profile.id, now_ms())
-        {
-            action = resumed;
-        }
         if local
             && matches!(action, PlayerAction::Play(None))
             && !state.0.controls.has_track()

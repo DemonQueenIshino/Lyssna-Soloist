@@ -660,9 +660,6 @@ pub enum PlayerAction {
         track_uid: Option<String>,
         position_ms: u64,
         relative_offset: i32,
-        /// From the DJ button: a session Spotify no longer loads gives way
-        /// to a fresh DJ instead of an error.
-        fresh_on_failure: bool,
     },
     Play(Option<String>),
     /// Start a playlist or album context, optionally at a track URI.
