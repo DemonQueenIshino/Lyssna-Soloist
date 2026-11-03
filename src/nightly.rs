@@ -658,7 +658,7 @@ impl<F: Fn(&Report)> Run<F> {
         if let Some((rust_home, ..)) = &own_rust {
             self.log(&format!("Using your rustup in {}", rust_home.display()));
         }
-        self.tools.target = root.join("target");
+        self.tools.target = cargo_target(&root);
         let client = client()?;
 
         // Room for everything first, rather than failing half way.
@@ -1097,7 +1097,6 @@ impl<F: Fn(&Report)> Run<F> {
         )?;
         self.set("crates", State::Done);
         self.set("app", State::Running);
-        free_built(&self.tools.target.join("release"));
         let build = ["build", "--release", "--locked", "--bin", "lyssna"];
         if let Err(error) = self.command(
             "app",
@@ -1987,26 +1986,11 @@ fn rust_version(source: &Path) -> Result<String> {
     })
 }
 
-/// Move the last build's executable out of Cargo's way. A copy still
-/// open (its start check, or a virus scan) can't be deleted, which fails
-/// the build with "Access is denied", but Windows lets it be renamed.
-fn free_built(release: &Path) {
-    let stale = release.join("stale");
-    // Moved copies are removed once nothing holds them any more.
-    if let Ok(entries) = fs::read_dir(&stale) {
-        for entry in entries.flatten() {
-            let _ = fs::remove_file(entry.path());
-        }
-    }
-    let built = release.join(format!("lyssna{EXE}"));
-    if !built.exists() || fs::remove_file(&built).is_ok() {
-        return;
-    }
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_nanos());
-    let _ = fs::create_dir_all(&stale)
-        .and_then(|()| fs::rename(&built, stale.join(format!("lyssna-{nanos}{EXE}"))));
+/// Where Cargo builds: a folder of its own inside `target`, so a copy run
+/// from an earlier build's `target\release` is never in Cargo's way.
+/// Clearing build files still removes all of `target`.
+fn cargo_target(root: &Path) -> PathBuf {
+    root.join("target").join("nightly")
 }
 
 /// A copy of the build beside the updates, so the build folder stays
@@ -2471,18 +2455,11 @@ mod other {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn the_last_build_moves_aside_for_the_next() {
-        let release =
-            std::env::temp_dir().join(format!("lyssna-free-built-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&release);
-        fs::create_dir_all(release.join("stale")).unwrap();
-        fs::write(release.join("stale").join("old"), b"x").unwrap();
-        let built = release.join(format!("lyssna{EXE}"));
-        fs::write(&built, b"x").unwrap();
-        free_built(&release);
-        assert!(!built.exists());
-        assert!(!release.join("stale").join("old").exists());
-        let _ = fs::remove_dir_all(&release);
+    fn builds_stay_clear_of_an_earlier_builds_executable() {
+        let root = std::path::Path::new("nightly");
+        let target = super::cargo_target(root);
+        assert_ne!(target.join("release"), root.join("target").join("release"));
+        assert!(target.starts_with(root.join("target")));
     }
 
     use super::*;
