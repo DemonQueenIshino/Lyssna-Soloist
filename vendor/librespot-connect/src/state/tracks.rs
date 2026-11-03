@@ -283,6 +283,25 @@ impl<'ct> ConnectState {
         Ok(())
     }
 
+    /// Replaces the queued tracks, keeping their UIDs: a Jam guest queues
+    /// the host's entries, so the host playing one doesn't restart it here.
+    pub fn replace_queue(&mut self, tracks: Vec<ProvidedTrack>) -> Result<(), Error> {
+        let next_tracks = self.next_tracks_mut();
+        next_tracks.retain(|t| !t.is_queue());
+        for (index, mut track) in tracks.into_iter().enumerate() {
+            track.set_provider(Provider::Queue);
+            if !track.is_from_queue() {
+                track.set_from_queue(true);
+            }
+            next_tracks.insert(index, track);
+        }
+        next_tracks.truncate(SPOTIFY_MAX_NEXT_TRACKS_SIZE);
+        self.fill_up_next_tracks()?;
+        self.update_queue_revision();
+        self.update_restrictions();
+        Ok(())
+    }
+
     /// Remove the first queued track with this URI, as Spotify's
     /// Remove from queue does, and fill up from the context again.
     /// Returns whether a track was removed.

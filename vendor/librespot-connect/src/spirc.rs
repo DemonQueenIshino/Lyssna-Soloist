@@ -29,7 +29,7 @@ use crate::{
     },
     state::{
         context::{ContextType, ResetContext},
-        provider::IsProvider,
+        provider::{IsProvider, Provider},
         {ConnectConfig, ConnectState},
     },
 };
@@ -110,6 +110,8 @@ struct SpircTask {
 
     /// The Jam queue last lined up, so resends with the same queue skip it.
     jam_queue_hash: Option<u64>,
+    /// The host's queued songs last lined up, as with `jam_queue_hash`.
+    jam_queued_hash: Option<u64>,
     /// The Jam this device hosts, whose session its state carries.
     jam_host: Option<String>,
     /// The Jam diagnostics last logged: the active device's state, then this one's.
@@ -762,6 +764,7 @@ impl Spirc {
 
             transfer_state: None,
             jam_queue_hash: None,
+            jam_queued_hash: None,
             jam_host: None,
             jam_states_logged: Default::default(),
             jam_session_seen: None,
@@ -2019,6 +2022,7 @@ impl SpircTask {
             return Ok(());
         }
 
+        let host_queue = transfer.queue.take();
         let session = transfer.current_session.mut_or_insert_default();
         let current_uid = session.current_uid.clone();
         let mut context = session.context.take().unwrap_or_default();
@@ -2096,13 +2100,16 @@ impl SpircTask {
         };
 
         let loads = matches!(plan, Plan::Load { .. });
+        let host_plays_queued = host_queue
+            .as_ref()
+            .is_some_and(|queue| queue.is_playing_queue.unwrap_or_default());
         let new_track = match host_track.as_ref() {
             Some(track) if loads => Some(self.connect_state.context_to_provided_track(
                 track,
                 Some(&context_uri),
                 None,
                 None,
-                None,
+                host_plays_queued.then_some(Provider::Queue),
             )?),
             _ => None,
         };
@@ -2140,8 +2147,58 @@ impl SpircTask {
         if let Some(track) = new_track {
             self.connect_state.set_track(track);
         }
-        if queue_changed || loads {
+        // A queued song plays between list songs: the list stays where it was,
+        // not lined up after an entry for the same song.
+        if queue_changed || (loads && (!host_plays_queued || !has_queue)) {
             self.line_up_jam_queue()?;
+        }
+        // Songs the host added to the queue come apart from the Jam's list.
+        let queued_changed = match host_queue {
+            Some(queue) => {
+                let playing_queue = queue.is_playing_queue.unwrap_or_default();
+                log::warn!(
+                    target: "librespot_connect::jam",
+                    "Jam transfer queue: {} songs, host playing one={playing_queue}",
+                    queue.tracks.len()
+                );
+                let queued: Vec<_> = queue
+                    .tracks
+                    .iter()
+                    .skip(usize::from(playing_queue))
+                    .filter(|track| host_uid.is_none() || track.uid != host_uid)
+                    .filter_map(|track| {
+                        self.connect_state
+                            .context_to_provided_track(
+                                track,
+                                Some(&context_uri),
+                                None,
+                                None,
+                                Some(Provider::Queue),
+                            )
+                            .ok()
+                    })
+                    .collect();
+                let queued_hash = {
+                    use std::hash::{DefaultHasher, Hash, Hasher};
+                    let mut hash = DefaultHasher::new();
+                    for track in &queued {
+                        track.uri.hash(&mut hash);
+                        track.uid.hash(&mut hash);
+                    }
+                    hash.finish()
+                };
+                let changed = self.jam_queued_hash != Some(queued_hash);
+                if changed || queue_changed || loads {
+                    self.jam_queued_hash = Some(queued_hash);
+                    if let Err(e) = self.connect_state.replace_queue(queued) {
+                        log::warn!(target: "librespot_connect::jam", "Jam queue not lined up: {e}");
+                    }
+                }
+                changed
+            }
+            None => false,
+        };
+        if queue_changed || loads || queued_changed {
             self.emit_set_queue_event();
         }
 
@@ -2156,7 +2213,7 @@ impl SpircTask {
                     Some(false) => self.handle_play(),
                     None => {}
                 }
-                if queue_changed {
+                if queue_changed || queued_changed {
                     self.refresh_preload();
                 }
             }
@@ -3178,6 +3235,7 @@ mod shuffle_tests {
             session,
             transfer_state: None,
             jam_queue_hash: None,
+            jam_queued_hash: None,
             jam_host: None,
             jam_states_logged: Default::default(),
             jam_session_seen: None,
@@ -3396,6 +3454,71 @@ mod shuffle_tests {
             SpircPlayStatus::LoadingPlay { .. }
         ));
         assert_eq!(upcoming(&task), tracks()[5..]);
+        task.player.stop();
+    }
+
+    fn with_host_queue(mut request: Request, queued: &[(String, &str)], playing: bool) -> Request {
+        use crate::protocol::context_track::ContextTrack;
+        let Command::Transfer(transfer) = &mut request.command else {
+            unreachable!()
+        };
+        let state = transfer.data.as_mut().unwrap();
+        let tracks: Vec<_> = queued
+            .iter()
+            .map(|(uri, uid)| ContextTrack {
+                uri: Some(uri.clone()),
+                uid: Some((*uid).into()),
+                ..Default::default()
+            })
+            .collect();
+        if playing {
+            state.playback.mut_or_insert_default().current_track =
+                MessageField::some(tracks[0].clone());
+        }
+        let queue = state.queue.mut_or_insert_default();
+        queue.is_playing_queue = Some(playing);
+        queue.tracks = tracks;
+        request
+    }
+
+    #[tokio::test]
+    async fn a_jam_guest_shows_the_hosts_queued_songs() {
+        let mut task = task();
+        let now = task.server_now_ms();
+        let queued = [(tracks()[0].clone(), "q7"), (tracks()[1].clone(), "q8")];
+        task.handle_request(with_host_queue(
+            jam_transfer(3, 0, false, now),
+            &queued,
+            false,
+        ))
+        .await
+        .unwrap();
+        let next = |task: &SpircTask| task.connect_state.player().next_tracks.clone();
+        let upcoming = next(&task);
+        assert_eq!(
+            upcoming[..3]
+                .iter()
+                .map(|t| (t.uri.as_str(), t.uid.as_str(), t.is_queue()))
+                .collect::<Vec<_>>(),
+            [
+                (tracks()[0].as_str(), "q7", true),
+                (tracks()[1].as_str(), "q8", true),
+                (tracks()[4].as_str(), "u4", false),
+            ]
+        );
+
+        // The host plays its first queued song: it leaves the guest's queue.
+        task.handle_request(with_host_queue(
+            jam_transfer(3, 0, false, now),
+            &queued,
+            true,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(task.connect_state.current_track(|t| t.uid.clone()), "q7");
+        let upcoming = next(&task);
+        assert_eq!(upcoming[0].uid, "q8");
+        assert!(upcoming.iter().all(|t| t.uid != "q7"));
         task.player.stop();
     }
 
