@@ -1771,9 +1771,23 @@ impl Backend {
                 } else {
                     (self.api()?.queue().unwrap_or_default(), 0)
                 };
+                crate::native::diagnostic(&format!(
+                    "details queue {} songs, {queued} queued",
+                    queue.len()
+                ));
+                // Shown first: warming the next songs below waits on the network.
+                let upcoming: Vec<Track> = queue.iter().take(3).cloned().collect();
+                self.emit(Event::PlayingDetails {
+                    uri: track.uri.clone(),
+                    details: Box::new(PlayingDetails {
+                        artists,
+                        queue,
+                        queued,
+                    }),
+                });
                 // Warm the next songs' lyrics and artist cards so skipping
                 // shows them at once, as Canvas below.
-                let next: Vec<Track> = queue.iter().take(2).cloned().collect();
+                let next: Vec<Track> = upcoming.iter().take(2).cloned().collect();
                 if !next.is_empty() {
                     let token = if crate::provider::requires_spotify_token() {
                         self.api()?.provider_token().unwrap_or_default()
@@ -1804,11 +1818,8 @@ impl Backend {
                 }
                 {
                     // Warm the next tracks' Canvas so skipping shows video at once.
-                    let upcoming: Vec<String> = queue
-                        .iter()
-                        .take(3)
-                        .map(|track| track.uri.clone())
-                        .collect();
+                    let upcoming: Vec<String> =
+                        upcoming.into_iter().map(|track| track.uri).collect();
                     let native = self.scoped_native();
                     let events = self.events.clone();
                     thread::spawn(move || {
@@ -1819,14 +1830,6 @@ impl Backend {
                         }
                     });
                 }
-                self.emit(Event::PlayingDetails {
-                    uri: track.uri.clone(),
-                    details: Box::new(PlayingDetails {
-                        artists,
-                        queue,
-                        queued,
-                    }),
-                });
             }
             Command::SetSaved { uri, saved } => {
                 if (!self.native_ready() || self.native_controls.set_saved(&uri, saved).is_err())

@@ -923,6 +923,10 @@ impl Desktop {
                                 }
                                 snapshot.details = details.clone();
                                 emit(json!({"type":"playing_details","uri":uri,"details":details}));
+                            } else {
+                                crate::native::diagnostic(
+                                    "details dropped: the song changed meanwhile",
+                                );
                             }
                         }
                         Event::PageChanged(key) => {
