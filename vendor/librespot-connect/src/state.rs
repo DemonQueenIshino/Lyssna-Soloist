@@ -539,6 +539,7 @@ mod dj_tests {
     use crate::protocol::{
         context::Context, context_page::ContextPage, context_track::ContextTrack,
     };
+    use crate::state::metadata::Metadata;
     use std::collections::HashMap;
 
     const DJ: &str = "spotify:playlist:37i9dQZF1EYkqdzj48dyYq";
@@ -572,6 +573,39 @@ mod dj_tests {
             next_page_url: Some(next.into()),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn a_dj_set_served_again_is_not_played_again() {
+        let mut state = state();
+        let first = Context {
+            uri: Some(DJ.into()),
+            pages: vec![segment(0, 5, "hm://lexicon/session/1")],
+            ..Default::default()
+        };
+        state.update_context(first, ContextType::Default).unwrap();
+        state.player_mut().context_uri = DJ.into();
+        // The same five again, then three new after two old.
+        state
+            .fill_context_from_page(segment(0, 5, "hm://lexicon/session/2"))
+            .unwrap();
+        state
+            .fill_context_from_page(segment(3, 5, "hm://lexicon/session/3"))
+            .unwrap();
+        let ctx = state.get_context(ContextType::Default).unwrap();
+        let uris: Vec<_> = ctx.tracks.iter().map(|t| t.uri.clone()).collect();
+        assert_eq!(uris.len(), 8);
+        assert_eq!(
+            ctx.tracks.last().and_then(|t| t.get_context_index()),
+            Some(7)
+        );
+        // A session stuck on one set stops being asked after a few tries.
+        for page in 4..8 {
+            state
+                .fill_context_from_page(segment(0, 8, &format!("hm://lexicon/session/{page}")))
+                .unwrap();
+        }
+        assert_eq!(state.take_next_page_url(), None);
     }
 
     #[tokio::test]

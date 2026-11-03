@@ -30,7 +30,13 @@ pub struct StateContext {
     pub index: ContextIndex,
     /// Where the tracks continue, for contexts that stream in pages like DJ.
     pub next_page_url: Option<String>,
+    /// DJ pages in a row that brought no song not already in the session.
+    pub repeated_pages: u8,
 }
+
+/// DJ pages that only repeat songs before DJ stops asking and autoplay
+/// carries on, so a session that keeps serving one set can't loop it.
+const MAX_REPEATED_PAGES: u8 = 3;
 
 #[derive(Default, Debug, Copy, Clone, PartialEq, Hash, Eq)]
 pub enum ContextType {
@@ -383,6 +389,7 @@ impl ConnectState {
             metadata,
             index: ContextIndex::new(),
             next_page_url: page.next_page_url.filter(|url| !url.is_empty()),
+            repeated_pages: 0,
         }
     }
 
@@ -508,16 +515,33 @@ impl ConnectState {
     pub fn fill_context_from_page(&mut self, page: ContextPage) -> Result<(), Error> {
         let ctx_len = self.context.as_ref().map(|c| c.tracks.len());
         let context = self.state_context_from_page(page, HashMap::new(), None, None, ctx_len, None);
+        // DJ's session can hand back a set already played, as when skipping
+        // faster than Spotify hears about it; those songs would loop.
+        let dj = self.context_uri() == crate::dj_cache::DJ_URI;
 
         let ctx = self
             .context
             .as_mut()
             .ok_or(StateError::NoContext(ContextType::Default))?;
 
-        for t in context.tracks {
+        let before = ctx.tracks.len();
+        for mut t in context.tracks {
+            if dj && ctx.tracks.iter().any(|known| known.uri == t.uri) {
+                continue;
+            }
+            t.set_context_index(ctx.tracks.len());
             ctx.tracks.push(t)
         }
-        ctx.next_page_url = context.next_page_url.or(ctx.next_page_url.take());
+        if dj && ctx.tracks.len() == before {
+            ctx.repeated_pages = ctx.repeated_pages.saturating_add(1);
+        } else {
+            ctx.repeated_pages = 0;
+        }
+        ctx.next_page_url = if ctx.repeated_pages >= MAX_REPEATED_PAGES {
+            None
+        } else {
+            context.next_page_url.or(ctx.next_page_url.take())
+        };
 
         Ok(())
     }
