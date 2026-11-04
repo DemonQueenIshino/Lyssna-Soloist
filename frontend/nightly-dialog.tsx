@@ -234,6 +234,14 @@ function NightlyStepRow({ step }: { step: NightlyStep }) {
       {step.detail && (step.state === "running" || step.state === "failed") && (
         <p className="nightly-step-detail">{step.detail}</p>
       )}
+      {step.id === "app" &&
+        step.state === "running" &&
+        (step.progress ?? 0) >= 0.95 && (
+          <p className="nightly-step-note">
+            Still building, don&rsquo;t worry. The last few parts are Lyssna
+            itself and take the longest, often several minutes.
+          </p>
+        )}
     </li>
   );
 }

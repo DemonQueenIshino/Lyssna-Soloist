@@ -14173,6 +14173,19 @@ test("Nightly sets itself up and shows each step's progress", async ({
   ).toHaveAttribute("aria-valuenow", "40");
   await expect(building).toContainText("Already there");
   await expect(building).toContainText("downloading component");
+  await expect(building).not.toContainText("Still building");
+  await report([
+    step("cpp", "C++ build tools", "skipped"),
+    step("rust", "Rust", "done", 1),
+    step(
+      "app",
+      "Building Lyssna",
+      "running",
+      760 / 762,
+      "Building [=======> ] 760/762: lyssna(bin)",
+    ),
+  ]);
+  await expect(building).toContainText("Still building, don’t worry");
   await building.getByRole("button", { name: "Hide", exact: true }).click();
   await expect(building).toBeHidden();
   await expect(page.getByText(/Building Nightly · \d+%/)).toBeVisible();

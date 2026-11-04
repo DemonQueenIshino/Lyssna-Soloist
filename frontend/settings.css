@@ -989,8 +989,14 @@
   font-size: 12px;
 }
 .nightly-step > .nightly-bar,
-.nightly-step-detail {
+.nightly-step-detail,
+.nightly-step-note {
   grid-column: 2 / -1;
+}
+.nightly-step-note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted, #b3b3b3);
 }
 .nightly-step-detail {
   margin: 0;
