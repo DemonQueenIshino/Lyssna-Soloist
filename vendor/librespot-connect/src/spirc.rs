@@ -1657,9 +1657,21 @@ impl SpircTask {
                     self.jam_states_logged.0 = summary;
                 }
             }
+            // An empty active device means Spotify lost track of us (a stale
+            // cluster when another device appears or leaves, or an idle expiry),
+            // not that another device took over. Stopping there killed loads
+            // and paused songs; claim the spot back instead.
+            let nobody_active = cluster.active_device_id.is_empty();
             let became_inactive = self.connect_state.is_active()
+                && !nobody_active
                 && cluster.active_device_id != self.session.device_id();
-            if became_inactive {
+            if self.connect_state.is_active() && nobody_active {
+                log::warn!(
+                    target: "librespot_connect::devices",
+                    "Spotify listed no active device ({reason:?}); announcing this computer again"
+                );
+                self.update_state = true;
+            } else if became_inactive {
                 info!("device became inactive");
                 self.handle_disconnect().await?;
                 self.handle_stop();
@@ -3574,6 +3586,28 @@ mod shuffle_tests {
             order[2]
         );
         assert_eq!(upcoming(&task)[..3], order[3..6]);
+        task.player.stop();
+    }
+
+    #[tokio::test]
+    async fn no_active_device_in_a_cluster_does_not_stop_this_one() {
+        let mut task = task();
+        task.handle_activate(true);
+        task.update_state = false;
+        let update = ClusterUpdate {
+            cluster: Some(Cluster::default()).into(),
+            ..Default::default()
+        };
+        task.handle_cluster_update(update).await.unwrap();
+        assert!(task.connect_state.is_active());
+        assert!(
+            task.update_state,
+            "this computer should announce itself again"
+        );
+        assert_eq!(
+            task.connect_state.current_track(|track| track.uri.clone()),
+            tracks()[0]
+        );
         task.player.stop();
     }
 
