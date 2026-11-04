@@ -147,6 +147,8 @@ struct ControlConnection {
     queue_snapshot: Arc<Mutex<Option<Vec<QueueEntry>>>>,
     playlists: Option<async_channel::UnboundedSender<PlaylistRead>>,
     metadata: Option<async_channel::UnboundedSender<MetadataRead>>,
+    /// The player still sounding the song while audio reconnects.
+    carried: Arc<Mutex<Option<Arc<Player>>>>,
 }
 struct MetadataRead {
     offset: usize,
@@ -170,6 +172,19 @@ struct PlaybackServices<'a> {
     shared_session: &'a Mutex<Option<Session>>,
     loaded: &'a AtomicBool,
     queue_snapshot: &'a Mutex<Option<Vec<QueueEntry>>>,
+    carried: &'a Mutex<Option<Arc<Player>>>,
+    kept: &'a mut Option<KeptPlayer>,
+}
+
+/// The player and its audio path, kept from one Spotify connection to the
+/// next so a dropped connection doesn't cut off the song: the song is
+/// already downloaded, and the new connection takes it over where it is.
+struct KeptPlayer {
+    player: Arc<Player>,
+    mixer: Arc<SoftMixer>,
+    flush_audio: Arc<AtomicBool>,
+    audible_seeks: async_channel::UnboundedReceiver<()>,
+    playing: Arc<AtomicBool>,
 }
 
 /// An upcoming song, and whether the listener queued it rather than it
@@ -248,6 +263,7 @@ impl NativeControls {
             playlists: None,
             metadata: None,
             queue_snapshot: Arc::new(Mutex::new(Some(Vec::new()))),
+            carried: Default::default(),
         }))));
         (controls, receiver)
     }
@@ -387,6 +403,29 @@ impl NativeControls {
         } else {
             Some(event)
         }
+    }
+    /// Whether a song keeps playing while audio reconnects.
+    pub fn carrying_on(&self) -> bool {
+        self.0.lock().is_ok_and(|connection| {
+            connection.as_ref().is_some_and(|connection| {
+                connection
+                    .carried
+                    .lock()
+                    .is_ok_and(|player| player.is_some())
+            })
+        })
+    }
+    /// Pauses the song playing on while audio reconnects. False if none was.
+    pub fn pause_carried(&self) -> bool {
+        let player = self.0.lock().ok().and_then(|connection| {
+            connection
+                .as_ref()?
+                .carried
+                .lock()
+                .ok()
+                .and_then(|mut player| player.take())
+        });
+        player.inspect(|player| player.pause()).is_some()
     }
     pub fn has_track(&self) -> bool {
         self.0.lock().is_ok_and(|connection| {
@@ -2130,6 +2169,7 @@ impl NativePlayer {
         let thread_ready = ready.clone();
         let loaded = Arc::new(AtomicBool::new(false));
         let queue_snapshot = Arc::new(Mutex::new(None));
+        let carried: Arc<Mutex<Option<Arc<Player>>>> = Arc::default();
         let audio_buffer = crate::audio::AudioBuffer::default();
         let connection_status = Arc::new(Mutex::new(None));
         let (sender, mut commands) = async_channel::unbounded_channel();
@@ -2158,6 +2198,7 @@ impl NativePlayer {
                 ready: ready.clone(),
                 loaded: loaded.clone(),
                 queue_snapshot: queue_snapshot.clone(),
+                carried: carried.clone(),
                 playlists: Some(playlist_sender),
                 metadata: Some(metadata_sender),
             });
@@ -2198,6 +2239,7 @@ impl NativePlayer {
                 (runtime, None, None)
             };
             let mut backoff = crate::reconnect::ReconnectBackoff::default();
+            let mut kept: Option<KeptPlayer> = None;
             loop {
                 if cancel.load(Ordering::Acquire) {
                     break;
@@ -2245,6 +2287,8 @@ impl NativePlayer {
                                 shared_session: &shared_session,
                                 loaded: &loaded,
                                 queue_snapshot: &queue_snapshot,
+                                carried: &carried,
+                                kept: &mut kept,
                             },
                             &thread_ready,
                             &emit,
@@ -2257,8 +2301,24 @@ impl NativePlayer {
                 if let Ok(mut queue) = queue_snapshot.lock() {
                     *queue = None;
                 }
-                audio_buffer.interrupt(None);
-                audio_buffer.output.retire_stream();
+                let reconnecting = matches!(&outcome, Outcome::Failed(failure) if failure.retryable)
+                    && !cancel.load(Ordering::Relaxed);
+                if !reconnecting && let Some(kit) = kept.take() {
+                    kit.player.stop();
+                }
+                let carrying = kept
+                    .as_ref()
+                    .filter(|kit| kit.playing.load(Ordering::Acquire))
+                    .map(|kit| kit.player.clone());
+                if carrying.is_none() {
+                    audio_buffer.interrupt(None);
+                    audio_buffer.output.retire_stream();
+                } else {
+                    diagnostic("song plays on while audio reconnects");
+                }
+                if let Ok(mut slot) = carried.lock() {
+                    *slot = carrying;
+                }
                 if let Ok(mut session) = shared_session.lock() {
                     *session = None;
                 }
@@ -2313,6 +2373,8 @@ async fn run(
         shared_session,
         loaded,
         queue_snapshot,
+        carried,
+        kept,
     } = channels;
     loaded.store(false, Ordering::Release);
     let (session, credentials) = match login.session {
@@ -2322,33 +2384,57 @@ async fn run(
             Some(login.credentials),
         ),
     };
-    let mixer = match SoftMixer::open(MixerConfig::default()) {
-        Ok(mixer) => Arc::new(mixer),
-        Err(_) => return Outcome::Failed(Failure::other("Cannot initialize audio mixer")),
+    let reconnected = kept.is_some();
+    if let Some(kit) = kept.as_ref() {
+        // The song from before the dropout may still be playing; later
+        // songs load through the new connection.
+        kit.player.set_session(session.clone());
+    } else {
+        let mixer = match SoftMixer::open(MixerConfig::default()) {
+            Ok(mixer) => Arc::new(mixer),
+            Err(_) => {
+                return Outcome::Failed(Failure::other("Cannot initialize audio mixer"));
+            }
+        };
+        let flush_audio = Arc::new(AtomicBool::new(false));
+        let sink_flush = flush_audio.clone();
+        let (seek_ready, audible_seeks) = async_channel::unbounded_channel();
+        let sink_buffer = audio_buffer.clone();
+        let sink_mixer = mixer.clone();
+        let player = Player::new(
+            PlayerConfig {
+                position_update_interval: Some(Duration::from_millis(250)),
+                ..PlayerConfig::default()
+            },
+            session.clone(),
+            Box::new(librespot_playback::mixer::NoOpVolume),
+            move || {
+                let mut sink = crate::audio::AudioSink::new(
+                    sink_flush.clone(),
+                    seek_ready.clone(),
+                    sink_buffer.clone(),
+                )
+                .with_mixer(sink_mixer.clone());
+                let _ = sink.prepare_output();
+                Box::new(sink)
+            },
+        );
+        *kept = Some(KeptPlayer {
+            player,
+            mixer,
+            flush_audio,
+            audible_seeks,
+            playing: Arc::default(),
+        });
+    }
+    let Some(kit) = kept.as_mut() else {
+        return Outcome::Failed(Failure::other("Cannot initialize audio"));
     };
-    let flush_audio = Arc::new(AtomicBool::new(false));
-    let sink_flush = flush_audio.clone();
-    let (seek_ready, mut audible_seeks) = async_channel::unbounded_channel();
-    let sink_buffer = audio_buffer.clone();
-    let sink_mixer = mixer.clone();
-    let player = Player::new(
-        PlayerConfig {
-            position_update_interval: Some(Duration::from_millis(250)),
-            ..PlayerConfig::default()
-        },
-        session.clone(),
-        Box::new(librespot_playback::mixer::NoOpVolume),
-        move || {
-            let mut sink = crate::audio::AudioSink::new(
-                sink_flush.clone(),
-                seek_ready.clone(),
-                sink_buffer.clone(),
-            )
-            .with_mixer(sink_mixer.clone());
-            let _ = sink.prepare_output();
-            Box::new(sink)
-        },
-    );
+    let mixer = kit.mixer.clone();
+    let flush_audio = kit.flush_audio.clone();
+    let carried_on = kit.playing.clone();
+    let audible_seeks = &mut kit.audible_seeks;
+    let player = kit.player.clone();
     let mut player_events = player.get_player_event_channel();
     let local_player = player.clone();
     let config = ConnectConfig {
@@ -2453,12 +2539,18 @@ async fn run(
         *shared = Some(session.clone());
     }
     ready.store(true, Ordering::Release);
+    if let Ok(mut slot) = carried.lock() {
+        *slot = None;
+    }
     emit(NativeEvent::Ready(session.device_id().to_owned()));
     let _ = spirc.prewarm_dj();
     let mut active = false;
     let mut modes = PlayModes::saved();
     let mut ordered = false;
-    let mut audio_playing = false;
+    // Pausing the carried song during the reconnect takes it out of the slot.
+    let mut audio_playing = reconnected
+        && carried_on.load(Ordering::Acquire)
+        && carried.lock().is_ok_and(|slot| slot.is_some());
     let mut intent = crate::playback_intent::PlaybackIntent::default();
     // While following a Jam its host decides play and pause; songs it loads
     // must not be resumed as if the listener had picked them.
@@ -2476,7 +2568,8 @@ async fn run(
         Duration::from_secs(8),
         prepare_resume(&session, crate::resume::load(account)),
     ));
-    let mut resume_prepared = false;
+    // After a dropout the player still holds its song; a saved one would replace it.
+    let mut resume_prepared = reconnected;
     let mut connection_lost = false;
     // A load Spotify Connect never starts would leave Play doing nothing.
     let mut load_due: Option<std::time::Instant> = None;
@@ -2663,6 +2756,7 @@ async fn run(
             }
         }
     }
+    carried_on.store(audio_playing, Ordering::Release);
     session.shutdown();
     if connection_lost {
         Outcome::Failed(Failure::transient("Native audio disconnected"))
@@ -3123,6 +3217,7 @@ mod tests {
             playlists: None,
             metadata: Some(metadata),
             queue_snapshot: Default::default(),
+            carried: Default::default(),
         });
         let service = thread::spawn(move || {
             if let Some(request) = requests.blocking_recv() {
@@ -3533,6 +3628,7 @@ mod tests {
                 playlists: None,
                 metadata: None,
                 queue_snapshot: Default::default(),
+                carried: Default::default(),
             });
             assert!(controls.send(action).is_ok());
             assert!(
@@ -3799,6 +3895,84 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Uses saved sign-in, plays the saved song and cuts its connection mid-song"]
+    fn live_song_keeps_playing_through_a_dropped_connection() {
+        let account = live_account();
+        let saved = crate::resume::load(&account).expect("Saved selection required");
+        let controls = NativeControls::default();
+        let (events, receive) = mpsc::channel();
+        let player = NativePlayer::start(account, 1, events, Default::default(), controls.clone());
+        let next = || match receive.recv_timeout(Duration::from_millis(100)) {
+            Ok(NativeMessage {
+                event: NativeEvent::Authorizing | NativeEvent::Error(_),
+                ..
+            }) => panic!("Audio failed instead of reconnecting"),
+            Ok(message) => Some(message.event),
+            Err(_) => None,
+        };
+        let started = std::time::Instant::now();
+        let mut ready = false;
+        while !ready {
+            assert!(
+                started.elapsed() < Duration::from_secs(40),
+                "No first connection"
+            );
+            ready = matches!(next(), Some(NativeEvent::Ready(_)));
+        }
+        let uri = saved.track.uri.clone();
+        assert!(controls.send(PlayerAction::Play(Some(uri.clone()))).is_ok());
+        let mut heard = None;
+        while heard.is_none() {
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "Song never played"
+            );
+            if let Some(NativeEvent::Position {
+                uri: playing,
+                position_ms,
+                ..
+            }) = next()
+                && playing == uri
+                && position_ms > 3_000
+            {
+                heard = Some(position_ms);
+            }
+        }
+        controls.session().unwrap().shutdown();
+        let cut = std::time::Instant::now();
+        let mut carried = false;
+        let mut reconnected = false;
+        let mut after = None;
+        while after.is_none() {
+            assert!(cut.elapsed() < Duration::from_secs(50), "Did not reconnect");
+            carried |= controls.carrying_on();
+            match next() {
+                Some(NativeEvent::Ready(_)) => reconnected = true,
+                Some(NativeEvent::Position {
+                    uri: playing,
+                    position_ms,
+                    ..
+                }) if reconnected && playing == uri => after = Some(position_ms),
+                Some(NativeEvent::Stopped) => panic!("The song stopped with the connection"),
+                _ => {}
+            }
+        }
+        let (before, after) = (heard.unwrap(), after.unwrap());
+        println!(
+            "song at {before} ms when cut, at {after} ms after reconnecting {} ms later",
+            cut.elapsed().as_millis()
+        );
+        assert!(carried, "The song was not carried through the reconnect");
+        assert!(
+            after >= before + 1_000,
+            "The song did not keep playing through the reconnect"
+        );
+        let _ = controls.send(PlayerAction::Pause);
+        std::thread::sleep(Duration::from_millis(300));
+        drop(player);
+    }
+
+    #[test]
     #[ignore = "Uses saved sign-in and deliberately disconnects one native session"]
     fn live_reconnect_recovers_without_another_browser_login() {
         let account = live_account();
@@ -3881,6 +4055,7 @@ mod tests {
             playlists: None,
             metadata: None,
             queue_snapshot: Default::default(),
+            carried: Default::default(),
         });
         assert!(controls.send(PlayerAction::Pause).is_ok());
         assert!(controls.connected_or_connecting("listener"));

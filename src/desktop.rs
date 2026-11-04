@@ -1066,15 +1066,18 @@ impl Desktop {
                             snapshot.native_ready = false;
                             snapshot.native_status =
                                 format!("Reconnecting native audio in {seconds}s…");
-                            if snapshot.playback.device.name == native::device_name() {
-                                if snapshot.playback.is_playing {
-                                    snapshot.playback = playback_now(&snapshot);
-                                    // Plays on once audio reconnects, instead of
-                                    // staying silent until someone presses Play.
-                                    if let Ok(mut resume) = pump.resume_on_ready.lock() {
-                                        *resume = Some(Instant::now());
-                                    }
-                                }
+                            // The song still sounding through the dropout, or cut off
+                            // by it: either way the new connection takes it over.
+                            if snapshot.playback.device.name == native::device_name()
+                                && snapshot.playback.is_playing
+                                && let Ok(mut resume) = pump.resume_on_ready.lock()
+                            {
+                                *resume = Some(Instant::now());
+                            }
+                            if snapshot.playback.device.name == native::device_name()
+                                && !pump.controls.carrying_on()
+                            {
+                                snapshot.playback = playback_now(&snapshot);
                                 snapshot.playback.is_playing = false;
                                 snapshot.observed_at = now_ms();
                                 emit(
@@ -1115,14 +1118,31 @@ impl Desktop {
                                 .lock()
                                 .ok()
                                 .and_then(|mut resume| resume.take())
-                                .is_some_and(|lost| lost.elapsed() < RESUME_AFTER_DROP)
+                                .is_some_and(|lost| {
+                                    lost.elapsed() < RESUME_AFTER_DROP
+                                        || snapshot.playback.is_playing
+                                })
                                 && !clicked
                                 && snapshot.playback.item.is_some()
                             {
-                                native::diagnostic(
-                                    "resuming the song cut off by the dropped connection",
-                                );
-                                emit(json!({"type":"media_control","action":"play"}));
+                                // Picks up where the song is now: it may have kept
+                                // playing, or even ended, while audio reconnected.
+                                snapshot.playback = playback_now(&snapshot);
+                                snapshot.observed_at = now_ms();
+                                let ended = snapshot.playback.item.as_ref().is_some_and(|track| {
+                                    track.duration_ms > 0
+                                        && snapshot.playback.progress_ms.unwrap_or_default() + 1500
+                                            >= track.duration_ms
+                                });
+                                native::diagnostic(if ended {
+                                    "the song ended while audio reconnected; playing the next"
+                                } else {
+                                    "taking over the song from before the dropped connection"
+                                });
+                                emit(json!({
+                                    "type": "media_control",
+                                    "action": if ended { "next" } else { "play" },
+                                }));
                             }
                             if ["playlist:", "album:", "artist:"]
                                 .iter()
@@ -2319,6 +2339,15 @@ fn player(
             } else if matches!(action, PlayerAction::Pause) {
                 *lock(&state.0.queued_native)? = None;
                 *lock(&state.0.resume_on_ready)? = None;
+                if state.0.controls.pause_carried() {
+                    snapshot.playback = playback_now(&snapshot);
+                    snapshot.playback.is_playing = false;
+                    snapshot.observed_at = now_ms();
+                    let _ = app.emit(
+                        "lyssna",
+                        json!({"type":"playback","playback":snapshot.playback,"observed_at":snapshot.observed_at,"changed":false}),
+                    );
+                }
                 return Ok(());
             } else {
                 if matches!(
