@@ -827,6 +827,8 @@ export function reducer(state: AppState, action: Action): AppState {
     case "notice":
       return {
         ...state,
+        // A failed start reports no play or pause; settle the spinner here.
+        pending: action.stalled ? undefined : state.pending,
         toast: {
           message: action.message,
           error: action.error,

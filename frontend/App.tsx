@@ -1057,9 +1057,16 @@ function App() {
       if (request.track)
         dispatch({ type: "play_requested", track: request.track });
       if (request.command === "dj") dispatch({ type: "dj_requested" });
-      void call("player", { request, target });
+      rpc("player", { request, target }).catch((error) =>
+        dispatch({
+          type: "notice",
+          message: String(error),
+          error: true,
+          stalled: true,
+        }),
+      );
     },
-    [call, target, updateSettings],
+    [target, updateSettings],
   );
   const playRef = useRef(play);
   playRef.current = play;

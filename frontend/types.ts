@@ -508,7 +508,7 @@ export type AppEvent =
   | { type: "lyrics"; uri: string; lyrics: Lyrics }
   | { type: "lyric_error"; uri: string; message: string }
   | { type: "devices"; devices: Device[] }
-  | { type: "notice"; message: string; error: boolean }
+  | { type: "notice"; message: string; error: boolean; stalled?: boolean }
   | { type: "saved"; uri: string; saved: boolean }
   | { type: "saved_many"; items: Record<string, boolean> }
   | { type: "update"; status: string; version?: string; notes?: string }

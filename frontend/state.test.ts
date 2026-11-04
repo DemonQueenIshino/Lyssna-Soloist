@@ -441,6 +441,23 @@ describe("asynchronous playback and browsing", () => {
     expect(paused.pending).toBeUndefined();
     expect(paused.playback.is_playing).toBe(false);
   });
+  it("stops the loading spinner when a start fails, but not for other notices", () => {
+    const loading = reducer(emptyState, { type: "play_requested", track });
+    const info = reducer(loading, {
+      type: "notice",
+      message: "Added to queue",
+      error: false,
+    });
+    expect(info.pending).toBeDefined();
+    const failed = reducer(loading, {
+      type: "notice",
+      message: "Spotify didn't start that. Press Play to try again.",
+      error: true,
+      stalled: true,
+    });
+    expect(failed.pending).toBeUndefined();
+    expect(failed.toast?.message).toContain("didn't start");
+  });
   it("ignores lyrics for a previous track", () => {
     const current = {
       ...emptyState,
