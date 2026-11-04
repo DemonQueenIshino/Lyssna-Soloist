@@ -234,6 +234,9 @@ export function SettingsWindow({
   const nightly = state.settings.update_channel === "nightly";
   const nightlyReport = state.nightly ?? nightlyStatus?.report ?? null;
   const nightlyBuilding = nightlyStarting || !!nightlyReport?.running;
+  // The channel turns Nightly once the build installs; show the choice
+  // from the moment the build starts.
+  const nightlyChosen = nightly || nightlyBuilding;
   useEffect(() => {
     if (state.nightly) setNightlyStarting(false);
   }, [state.nightly]);
@@ -1528,7 +1531,7 @@ export function SettingsWindow({
           key="update-channel"
           label="Version"
           help={
-            nightly
+            nightlyChosen
               ? "Nightly: the newest changes, built by Lyssna on this computer from the latest code."
               : "Stable: tested releases that update automatically."
           }
@@ -1537,10 +1540,16 @@ export function SettingsWindow({
           <select
             className="settings-select"
             aria-label="Version"
-            value={nightly ? "nightly" : "stable"}
+            value={nightlyChosen ? "nightly" : "stable"}
             onChange={(event) => {
               if (event.target.value === "nightly") setNightlyOpen(true);
-              else onSettings({ update_channel: "stable" });
+              else {
+                if (nightlyBuilding) {
+                  setNightlyStarting(false);
+                  void onCall("nightly_cancel");
+                }
+                onSettings({ update_channel: "stable" });
+              }
             }}
           >
             <option value="stable">Stable</option>

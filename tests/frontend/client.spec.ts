@@ -14137,6 +14137,8 @@ test("Nightly sets itself up and shows each step's progress", async ({
   await dialog
     .getByRole("button", { name: "Build Nightly", exact: true })
     .click();
+  // Chosen the moment Build Nightly is pressed, not only once it installs.
+  await expect(version).toHaveValue("nightly");
   await expect.poll(() => calls("nightly_build")).toBe(1);
   const step = (
     id: string,
@@ -14188,6 +14190,7 @@ test("Nightly sets itself up and shows each step's progress", async ({
   await expect(building).toContainText("Still building, don’t worry");
   await building.getByRole("button", { name: "Hide", exact: true }).click();
   await expect(building).toBeHidden();
+  await expect(version).toHaveValue("nightly");
   await expect(page.getByText(/Building Nightly · \d+%/)).toBeVisible();
   await page
     .getByRole("button", { name: "Show progress", exact: true })
@@ -14206,6 +14209,7 @@ test("Nightly sets itself up and shows each step's progress", async ({
   await expect(stopped.getByRole("alert")).toHaveText(
     "cargo failed (exit code 101)",
   );
+  await expect(version).toHaveValue("stable");
   await stopped.getByRole("button", { name: "Open log", exact: true }).click();
   await expect.poll(() => calls("nightly_log")).toBe(1);
   await stopped.getByRole("button", { name: "Try again", exact: true }).click();
