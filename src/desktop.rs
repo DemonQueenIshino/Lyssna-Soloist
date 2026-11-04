@@ -26,6 +26,8 @@ use tauri::{Emitter, Manager, State};
 
 /// Drop playback queued during connect if audio took longer than this.
 const QUEUED_NATIVE_TTL: Duration = Duration::from_secs(45);
+/// Play on after a dropped connection only if audio came back this soon.
+const RESUME_AFTER_DROP: Duration = Duration::from_secs(120);
 fn send_queued_native(
     queued: &Mutex<Option<(PlayerAction, Instant)>>,
     controls: &NativeControls,
@@ -98,6 +100,8 @@ struct Inner {
     start_timing: Mutex<Option<(String, Instant, &'static str)>>,
     /// Local playback requested before native audio connected.
     queued_native: Mutex<Option<(PlayerAction, Instant)>>,
+    /// When a dropped connection cut off a playing song; Play resumes it.
+    resume_on_ready: Mutex<Option<Instant>>,
     login_cancelled: Mutex<Arc<AtomicBool>>,
     stopped: AtomicBool,
     update_commands: mpsc::Sender<updater::Command>,
@@ -357,6 +361,7 @@ impl Desktop {
             jam_commands: Mutex::new(None),
             start_timing: Mutex::new(None),
             queued_native: Mutex::new(None),
+            resume_on_ready: Mutex::new(None),
             login_cancelled: Mutex::new(Arc::new(AtomicBool::new(false))),
             stopped: AtomicBool::new(false),
             update_commands: updates.commands.clone(),
@@ -1062,6 +1067,14 @@ impl Desktop {
                             snapshot.native_status =
                                 format!("Reconnecting native audio in {seconds}s…");
                             if snapshot.playback.device.name == native::device_name() {
+                                if snapshot.playback.is_playing {
+                                    snapshot.playback = playback_now(&snapshot);
+                                    // Plays on once audio reconnects, instead of
+                                    // staying silent until someone presses Play.
+                                    if let Ok(mut resume) = pump.resume_on_ready.lock() {
+                                        *resume = Some(Instant::now());
+                                    }
+                                }
                                 snapshot.playback.is_playing = false;
                                 snapshot.observed_at = now_ms();
                                 emit(
@@ -1093,10 +1106,23 @@ impl Desktop {
                             snapshot.native_status = "Ready · this computer".into();
                             // Reload playlists from Spotify's own library list.
                             let _ = pump.commands.send(Command::Library);
-                            if send_queued_native(&pump.queued_native, &pump.controls)
-                                && let Ok(mut last) = pump.last_native.lock()
-                            {
+                            let clicked = send_queued_native(&pump.queued_native, &pump.controls);
+                            if clicked && let Ok(mut last) = pump.last_native.lock() {
                                 *last = Some(Instant::now());
+                            }
+                            if pump
+                                .resume_on_ready
+                                .lock()
+                                .ok()
+                                .and_then(|mut resume| resume.take())
+                                .is_some_and(|lost| lost.elapsed() < RESUME_AFTER_DROP)
+                                && !clicked
+                                && snapshot.playback.item.is_some()
+                            {
+                                native::diagnostic(
+                                    "resuming the song cut off by the dropped connection",
+                                );
+                                emit(json!({"type":"media_control","action":"play"}));
                             }
                             if ["playlist:", "album:", "artist:"]
                                 .iter()
@@ -2292,6 +2318,7 @@ fn player(
                 );
             } else if matches!(action, PlayerAction::Pause) {
                 *lock(&state.0.queued_native)? = None;
+                *lock(&state.0.resume_on_ready)? = None;
                 return Ok(());
             } else {
                 if matches!(
