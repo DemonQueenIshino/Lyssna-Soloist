@@ -1155,9 +1155,9 @@ impl Desktop {
                                 json!({"type":"native","ready":false,"status":snapshot.native_status}),
                             );
                         }
-                        NativeEvent::ControlError(message) => {
-                            emit(json!({"type":"notice","message":message,"error":true}))
-                        }
+                        NativeEvent::ControlError(message) => emit(
+                            json!({"type":"notice","message":message,"error":true,"stalled":true}),
+                        ),
                         NativeEvent::Position {
                             uri,
                             position_ms,
@@ -1294,6 +1294,29 @@ impl Desktop {
                             }
                         }
                     }
+                }
+                // A click parked for audio that never came back would spin forever.
+                let expired = pump.queued_native.lock().is_ok_and(|mut queued| {
+                    queued
+                        .take_if(|(_, at)| at.elapsed() >= QUEUED_NATIVE_TTL)
+                        .is_some()
+                });
+                if expired {
+                    let account = pump.snapshot.lock().ok().and_then(|snapshot| {
+                        snapshot.profile.as_ref().map(|profile| profile.id.clone())
+                    });
+                    native::diagnostic(&format!(
+                        "parked click dropped: audio {}",
+                        native::status_label(
+                            pump.controls.connection_event(account.as_deref()).as_ref()
+                        )
+                    ));
+                    emit(json!({
+                        "type": "notice",
+                        "message": "This computer's audio didn't reconnect in time. Press Play to try again.",
+                        "error": true,
+                        "stalled": true,
+                    }));
                 }
                 while let Ok(event) = updates.events.try_recv() {
                     let Ok(mut snapshot) = pump.snapshot.lock() else {
@@ -2043,6 +2066,32 @@ fn player(
             lock(&state.0.native_id)?.as_deref(),
             &snapshot.playback.device,
         );
+        if request.command != "volume" {
+            native::diagnostic(&format!(
+                "click {}: {}",
+                request.command,
+                if local {
+                    format!(
+                        "this computer, audio {}",
+                        native::status_label(
+                            state
+                                .0
+                                .controls
+                                .connection_event(
+                                    snapshot.profile.as_ref().map(|profile| profile.id.as_str())
+                                )
+                                .as_ref()
+                        )
+                    )
+                } else {
+                    format!(
+                        "other device {:?} (shown device {:?})",
+                        target.as_deref().unwrap_or("none"),
+                        snapshot.playback.device.name
+                    )
+                }
+            ));
+        }
         if local && let Some(profile) = snapshot.profile.as_ref() {
             action = liked_from_collection(action, request.context.as_deref(), &profile.id);
         }
@@ -2249,7 +2298,7 @@ fn player(
                     state.0.controls.connection_event(
                         snapshot.profile.as_ref().map(|profile| profile.id.as_str())
                     ),
-                    Some(NativeEvent::Error(_))
+                    Some(NativeEvent::Error(_)) | None
                 ) {
                     state.0.commands.send(Command::EnsureAudio)?;
                 }

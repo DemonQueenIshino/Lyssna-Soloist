@@ -1000,6 +1000,18 @@ fn event_summary(event: &PlayerEvent) -> Option<(&'static str, String)> {
 
 /// Append one line to a small local log of transport commands and player
 /// events, for diagnosing stalls. Holds no account data or credentials.
+/// Short connection state for the diagnostics log.
+pub(crate) fn status_label(event: Option<&NativeEvent>) -> String {
+    match event {
+        Some(NativeEvent::Ready(_)) => "ready".into(),
+        Some(NativeEvent::Authorizing) => "authorizing".into(),
+        Some(NativeEvent::Reconnecting(seconds)) => format!("reconnecting in {seconds}s"),
+        Some(NativeEvent::Error(message)) => format!("error: {message}"),
+        Some(_) => "connecting".into(),
+        None => "not started".into(),
+    }
+}
+
 pub(crate) fn diagnostic(line: &str) {
     use std::io::Write;
     let Ok(dir) = crate::config::data_dir().map(|dir| dir.join("diagnostics")) else {
@@ -1010,7 +1022,7 @@ pub(crate) fn diagnostic(line: &str) {
     }
     let path = dir.join("player-events.log");
     if std::fs::metadata(&path).is_ok_and(|meta| meta.len() > 256 * 1024) {
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::rename(&path, dir.join("player-events.old.log"));
     }
     let when = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
@@ -2160,6 +2172,7 @@ impl NativePlayer {
                         | NativeEvent::Error(_)
                 ) && let Ok(mut status) = connection_status.lock()
                 {
+                    diagnostic(&format!("audio {}", status_label(Some(&event))));
                     *status = Some(event.clone());
                 }
                 let _ = events.send(NativeMessage { generation, event });
@@ -2496,7 +2509,7 @@ async fn run(
                 let _ = tokio::time::timeout(Duration::from_secs(2), &mut task).await;
                 break;
             }
-            _ = &mut task => { connection_lost = true; break; }
+            _ = &mut task => { diagnostic(&format!("audio connection ended (session closed: {})", session.is_invalid())); connection_lost = true; break; }
             Some(action) = commands.recv() => {
                 if let Some(kind) = command_kind(&action) {
                     diagnostic(&format!("command {kind}"));
@@ -2556,7 +2569,7 @@ async fn run(
                     Some(PlayerEvent::VolumeChanged{volume})=>{let value=((u32::from(volume)*100+u32::from(u16::MAX)/2)/u32::from(u16::MAX))as u8;if let Some((wanted,until))=volume_guard&&std::time::Instant::now()<until&&wanted!=value{mixer.set_volume((u32::from(wanted)*u32::from(u16::MAX)/100)as u16);}else{emit(NativeEvent::Transport{shuffle:None,repeat:None,volume:Some(value)});}},
                     Some(PlayerEvent::JamChanged { following, session }) => {diagnostic(&format!("event jam following={following}"));if following&&!jam_following{intent.reset();}jam_following=following;emit(NativeEvent::Jam(following, session));},
                     Some(PlayerEvent::SessionConnected { .. }) => active = true,
-                    Some(PlayerEvent::SessionDisconnected { .. }) => {active=false;paused_position=None;loaded.store(false,Ordering::Release);},
+                    Some(PlayerEvent::SessionDisconnected { .. }) => {diagnostic("Spotify made this computer inactive");active=false;paused_position=None;loaded.store(false,Ordering::Release);},
                     Some(PlayerEvent::Stopped{..})=>{loaded.store(false,Ordering::Release);audio_playing=false;paused_position=None;intent.reset();emit(NativeEvent::Stopped);},
                     Some(event @ PlayerEvent::TrackChanged { .. }) => {load_due=None;loaded.store(true,Ordering::Release);pending_seek=None;paused_position=None;if let Some(track)=public_track_change(&event) {if !jam_following{intent.track_loading(track.uri.clone(),std::time::Instant::now());} emit(NativeEvent::Track(Box::new(track))); } },
                     Some(PlayerEvent::Playing { track_id, position_ms, .. }) => {
@@ -2584,7 +2597,7 @@ async fn run(
                     // Spotify skips unplayable tracks itself and also reports failed
                     // preloads; only a current track that stays stuck is an error.
                     Some(PlayerEvent::Unavailable { track_id, .. }) => unavailable.unavailable(&track_id.to_uri(), std::time::Instant::now()),
-                    None => { connection_lost = true; break; },
+                    None => { diagnostic("audio connection ended: player events closed"); connection_lost = true; break; },
                     _ => {}
                 }
             }
