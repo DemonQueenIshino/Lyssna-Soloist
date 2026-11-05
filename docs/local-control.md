@@ -12,7 +12,8 @@ Connect to `127.0.0.1` on that port. Send one JSON object per line:
 {"type":"hello","key":"<key from discovery file>","protocol":2}
 ```
 
-The server replies with `{"type":"ready","protocol":2}`, then sends its usual
+The server replies with `{"type":"ready","protocol":2,"pid":1234,"windowHandle":123456}`
+(using its process ID and main window handle; the handle is null outside Windows), then sends its usual
 `state` and `lyrics` events. Older clients that omit `protocol` keep their existing
 wire format. An older Lyssna build does not advertise protocol 2.
 

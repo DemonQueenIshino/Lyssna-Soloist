@@ -386,7 +386,14 @@ fn serve(
         let mut writer = stream.try_clone()?;
         if requests {
             writer.set_write_timeout(Some(Duration::from_secs(2)))?;
-            writer.write_all(b"{\"type\":\"ready\",\"protocol\":2}\n")?;
+            #[cfg(windows)]
+            let window = app
+                .get_webview_window("main")
+                .and_then(|window| window.hwnd().ok())
+                .map(|handle| handle.0 as usize);
+            #[cfg(not(windows))]
+            let window: Option<usize> = None;
+            writer.write_all(format!("{}\n", json!({"type":"ready", "protocol":2, "pid":std::process::id(), "windowHandle":window})).as_bytes())?;
         }
         writer.write_all(state_line(&shared.state).as_bytes())?;
         if !shared.lyrics.is_empty() {
