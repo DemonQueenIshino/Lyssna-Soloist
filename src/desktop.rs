@@ -2902,6 +2902,16 @@ async fn jam(
                 *current = next;
             }
         }
+        // Jam songs come from the host, so they never end a local client's quiet output.
+        if matches!(action.as_str(), "start" | "join")
+            && matches!(result, Ok(Some(_)))
+            && inner
+                .controls
+                .audio_buffer()
+                .is_ok_and(|output| output.clear_temporary_volume())
+        {
+            crate::native::diagnostic("joining a Jam ended a local client's quiet playback");
+        }
         result
     })
     .await

@@ -48,8 +48,8 @@ are rejected while a Jam owns its commands. Temporary audio control is exclusive
 to one local connection. It changes output gain without changing the user's mixer
 setting or saved volume. Disconnecting restores normal output and pauses playback
 owned by a quiet session; calibration restores prior playback when the user has
-not selected another track. Picking another song, or skipping, in Lyssna itself
-ends a client's temporary output level. Clients should release unused preparation or
+not selected another track. Picking another song, skipping, or starting or joining
+a Jam in Lyssna itself ends a client's temporary output level. Clients should release unused preparation or
 calibration sessions promptly. A prior playback queue is not restored.
 
 Search and metadata replies use the same track shape as state events:
