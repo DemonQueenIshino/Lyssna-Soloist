@@ -3663,6 +3663,87 @@ const PROFILE_WINDOW_SCRIPT: &str = r#"(() => {
   addEventListener("popstate", chromeless);
   chromeless();
 })();"#;
+/// `Emulation.setUserAgentOverride` parameters presenting WebView2 as plain
+/// Chrome of the same major version. The profile site serves "Embeds have
+/// been retired" to any client whose `sec-ch-ua` names Microsoft Edge
+/// WebView2, so both the user agent and its client-hint brands change.
+fn chrome_identity(webview_agent: &str) -> String {
+    let major = webview_agent
+        .split("Chrome/")
+        .nth(1)
+        .and_then(|rest| rest.split('.').next())
+        .filter(|major| !major.is_empty() && major.bytes().all(|b| b.is_ascii_digit()))
+        .unwrap_or("142");
+    let brands = json!([
+        {"brand": "Chromium", "version": major},
+        {"brand": "Google Chrome", "version": major},
+        {"brand": "Not_A Brand", "version": "99"},
+    ]);
+    json!({
+        "userAgent": format!("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"),
+        "platform": "Win32",
+        "userAgentMetadata": {
+            "brands": brands,
+            "fullVersionList": brands,
+            "platform": "Windows",
+            "platformVersion": "15.0.0",
+            "architecture": "x86",
+            "bitness": "64",
+            "model": "",
+            "mobile": false,
+        },
+    })
+    .to_string()
+}
+/// Loads `url` once the window reports itself as Chrome.
+#[cfg(windows)]
+fn navigate_as_chrome(window: &tauri::WebviewWindow, url: tauri::Url) {
+    let fallback = window.clone();
+    let target = url.to_string();
+    let applied = window.with_webview(move |webview| unsafe {
+        use webview2_com::{
+            CallDevToolsProtocolMethodCompletedHandler,
+            Microsoft::Web::WebView2::Win32::ICoreWebView2Settings2,
+        };
+        use windows::core::{HSTRING, Interface, PWSTR, w};
+        let Ok(core) = webview.controller().CoreWebView2() else {
+            return;
+        };
+        let target = HSTRING::from(target);
+        let mut agent = PWSTR::null();
+        let current = core
+            .Settings()
+            .ok()
+            .and_then(|settings| settings.cast::<ICoreWebView2Settings2>().ok())
+            .and_then(|settings| {
+                settings.UserAgent(&mut agent).ok()?;
+                Some(webview2_com::take_pwstr(agent))
+            })
+            .unwrap_or_default();
+        let next = core.clone();
+        let then = target.clone();
+        let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |_, _| {
+            next.Navigate(&then)
+        }));
+        if core
+            .CallDevToolsProtocolMethod(
+                w!("Emulation.setUserAgentOverride"),
+                &HSTRING::from(chrome_identity(&current)),
+                &handler,
+            )
+            .is_err()
+        {
+            let _ = core.Navigate(&target);
+        }
+    });
+    if applied.is_err() {
+        let _ = fallback.navigate(url);
+    }
+}
+#[cfg(not(windows))]
+fn navigate_as_chrome(window: &tauri::WebviewWindow, url: tauri::Url) {
+    let _ = window.navigate(url);
+}
 /// Rounds a borderless window's corners wider than Windows' own 8 px.
 #[cfg(windows)]
 fn round_corners(
@@ -3844,28 +3925,32 @@ async fn open_creator_profile(
         // windows instead of behind them, where it lost focus and closed.
         let main = caller;
         let listens = app.clone();
-        let window =
-            tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::External(url))
-                .title(title)
-                .decorations(false)
-                .resizable(false)
-                .skip_taskbar(true)
-                // Its rounded region hides the shadow; the shadow's frame
-                // would still draw a light edge.
-                .shadow(false)
-                .visible(false)
-                .parent(&main)?
-                .additional_browser_args(BROWSER_ARGS)
-                .initialization_script(profile_window_script())
-                .on_navigation(move |url| {
-                    // Listen plays the song here instead of leaving the page.
-                    if let Some(uri) = listen_uri(url) {
-                        let _ = listens.emit("lyssna", json!({"type":"play_uri","uri":uri}));
-                        return false;
-                    }
-                    url.scheme() == "https" && url.host_str() == Some("spicylyrics.org")
-                })
-                .build()?;
+        let window = tauri::WebviewWindowBuilder::new(
+            &app,
+            label,
+            tauri::WebviewUrl::External("about:blank".parse()?),
+        )
+        .title(title)
+        .decorations(false)
+        .resizable(false)
+        .skip_taskbar(true)
+        // Its rounded region hides the shadow; the shadow's frame
+        // would still draw a light edge.
+        .shadow(false)
+        .visible(false)
+        .parent(&main)?
+        .additional_browser_args(BROWSER_ARGS)
+        .initialization_script(profile_window_script())
+        .on_navigation(move |url| {
+            // Listen plays the song here instead of leaving the page.
+            if let Some(uri) = listen_uri(url) {
+                let _ = listens.emit("lyssna", json!({"type":"play_uri","uri":uri}));
+                return false;
+            }
+            url.as_str() == "about:blank"
+                || (url.scheme() == "https" && url.host_str() == Some("spicylyrics.org"))
+        })
+        .build()?;
         let placed = || -> Result<()> {
             let (origin, size, scale) = (
                 main.inner_position()?,
@@ -3888,6 +3973,7 @@ async fn open_creator_profile(
             let _ = window.close();
             return Err(problem);
         }
+        navigate_as_chrome(&window, url);
         let _ = app.emit("lyssna", json!({"type":"creator_profile","open":true}));
         let events = app.clone();
         let popup = window.clone();
@@ -4827,6 +4913,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn profile_windows_present_as_chrome_of_the_same_version() {
+        let webview = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.3912.60 Safari/537.36 Edg/147.0.3912.60";
+        let identity: Value = serde_json::from_str(&chrome_identity(webview)).unwrap();
+        let agent = identity["userAgent"].as_str().unwrap();
+        assert!(agent.contains("Chrome/147.0.0.0") && !agent.contains("Edg"));
+        let brands = identity["userAgentMetadata"]["brands"].to_string();
+        assert!(brands.contains("Google Chrome") && !brands.contains("WebView2"));
+        assert!(chrome_identity("").contains("Chrome/142.0.0.0"));
+    }
     #[test]
     fn every_window_shares_the_browser_switches() {
         // WebView2 refuses a window whose switches differ from the browser
