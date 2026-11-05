@@ -174,10 +174,12 @@ impl HttpClient {
         // telling either end. Pings find such a connection and the pool
         // drops it, so a request after a long pause opens a fresh one
         // instead of waiting out TCP retransmits for about a minute.
+        // Pings also keep live connections warm, so they are kept for
+        // minutes: some networks stall a fresh TLS handshake for ~12 s.
         let client = Client::builder(TokioExecutor::new())
             .timer(TokioTimer::new())
             .pool_timer(TokioTimer::new())
-            .pool_idle_timeout(Duration::from_secs(30))
+            .pool_idle_timeout(Duration::from_secs(300))
             .http2_adaptive_window(true)
             .http2_keep_alive_interval(Duration::from_secs(20))
             .http2_keep_alive_timeout(Duration::from_secs(10))

@@ -266,6 +266,36 @@ fn credited_writers(data: &Value) -> Vec<String> {
     }
     names
 }
+const HEDGE_AFTER: Duration = Duration::from_secs(2);
+
+/// Some networks stall a fresh TLS handshake to Spotify for ~12 s. A second
+/// attempt on a new connection after `after` usually lands at once, so take
+/// whichever answers first. Only for idempotent requests.
+async fn hedged<F, Fut, T, E>(attempt: F, after: Duration) -> std::result::Result<T, E>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, E>>,
+{
+    let first = attempt();
+    tokio::pin!(first);
+    tokio::select! {
+        result = &mut first => return result,
+        () = tokio::time::sleep(after) => {}
+    }
+    let second = attempt();
+    tokio::pin!(second);
+    tokio::select! {
+        result = &mut first => match result {
+            Ok(value) => Ok(value),
+            Err(_) => second.await,
+        },
+        result = &mut second => match result {
+            Ok(value) => Ok(value),
+            Err(_) => first.await,
+        },
+    }
+}
+
 pub(crate) async fn query(
     session: &Session,
     operation: &str,
@@ -274,11 +304,22 @@ pub(crate) async fn query(
 ) -> Result<Value> {
     let token = session.login5().auth_token().await?;
     let client_token = session.spclient().client_token().await?;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(8))
-        .build()?;
-    let mut response=client.post("https://api-partner.spotify.com/pathfinder/v2/query").bearer_auth(token.access_token).header("client-token",client_token).header("app-platform","WebPlayer").header("spotify-app-version","896000000").json(&json!({"operationName":operation,"variables":variables,"extensions":{"persistedQuery":{"version":1,"sha256Hash":hash}}})).send().await?.error_for_status()?;
+    let body = json!({"operationName":operation,"variables":variables,"extensions":{"persistedQuery":{"version":1,"sha256Hash":hash}}});
+    let attempt = || async {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(8))
+            .build()?
+            .post("https://api-partner.spotify.com/pathfinder/v2/query")
+            .bearer_auth(&token.access_token)
+            .header("client-token", &client_token)
+            .header("app-platform", "WebPlayer")
+            .header("spotify-app-version", "896000000")
+            .json(&body)
+            .send()
+            .await
+    };
+    let mut response = hedged(attempt, HEDGE_AFTER).await?.error_for_status()?;
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await? {
         ensure!(
@@ -292,6 +333,60 @@ pub(crate) async fn query(
 #[cfg(test)]
 mod base_tests {
     use super::*;
+    #[tokio::test]
+    async fn a_stalled_request_is_overtaken_by_a_fresh_attempt() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let tries = AtomicUsize::new(0);
+        let started = std::time::Instant::now();
+        let result: std::result::Result<usize, ()> = hedged(
+            || {
+                let n = tries.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if n == 0 {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                    Ok(n)
+                }
+            },
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(result, Ok(1));
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let tries = AtomicUsize::new(0);
+        let fast: std::result::Result<usize, ()> = hedged(
+            || {
+                tries.fetch_add(1, Ordering::SeqCst);
+                async { Ok(7) }
+            },
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(fast, Ok(7));
+        assert_eq!(tries.load(Ordering::SeqCst), 1);
+
+        let failed_first: std::result::Result<u8, u8> = hedged(
+            {
+                let tries = AtomicUsize::new(0);
+                move || {
+                    let n = tries.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        if n == 0 {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            Err(1)
+                        } else {
+                            tokio::time::sleep(Duration::from_millis(300)).await;
+                            Ok(2)
+                        }
+                    }
+                }
+            },
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(failed_first, Ok(2));
+    }
     #[test]
     fn credits_keep_each_writer_once_and_skip_other_roles() {
         let data = json!({"data":{"trackUnion":{"creditsTrait":{"contributors":{"items":[
