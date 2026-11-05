@@ -31,7 +31,7 @@ responses. Each connection executes requests in order. Requests are limited to
 
 | Action | Arguments | Behavior |
 | --- | --- | --- |
-| `search` | `query`, optional `limit` | Search through the signed-in native session without changing the visible search page. |
+| `search` | `query`, optional `limit` | Search through the signed-in account without changing the visible search page. |
 | `track` | `uri` | Read track title, artists, duration and cover image. |
 | `prepare` | `uri` | Load silently, pause and return to the start. |
 | `play` | `uri`, optional `positionMs`, `quiet` | Play locally, then seek. `quiet: true` keeps playback silent for an external synchronized display. |

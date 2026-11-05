@@ -163,6 +163,9 @@ impl<'a> Session<'a> {
                 == self.loaded.as_deref()
         {
             self.control("pause", None, 0)?;
+            if let Some(uri) = &self.loaded {
+                self.wait_for(uri, false)?;
+            }
         }
         Ok(())
     }
@@ -195,7 +198,11 @@ impl<'a> Session<'a> {
             }
             if !saved.state.playing || saved.state.track.is_none() {
                 self.control("pause", None, 0)?;
+                if let Some(track) = &saved.state.track {
+                    self.wait_for(&track.uri, false)?;
+                }
             }
+            thread::sleep(Duration::from_millis(200));
             Ok(())
         })();
         if restore.is_err() {
