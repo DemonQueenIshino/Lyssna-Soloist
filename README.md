@@ -46,6 +46,8 @@ Press **F11** for full-screen lyrics over the Canvas. The controls fade out unti
 
 Sign-in uses OAuth with PKCE through a state-checked loopback callback. No Spotify developer app is needed, and later launches reuse the saved session.
 
+On macOS, Lyssna sends stereo playback through AVFoundation with stereo spatialization enabled. On an Apple silicon Mac with compatible AirPods, play a song, open the AirPods menu in the menu bar, and choose **Fixed** or **Head Tracked** under **Spatialize Stereo**. macOS controls the effect; the decoded music remains stereo. Availability depends on your Mac, headphones, and system settings. See [Apple's Spatial Audio guide](https://support.apple.com/guide/airpods/control-spatial-audio-and-head-tracking-dev00eb7e0a3/web).
+
 ## Privacy
 
 Spotify credentials stay on your computer: Windows Credential Manager on Windows, AES-256-GCM encrypted files on macOS. Lyrics requests carry the Spotify track ID, and Spotify tokens are never sent to Spicy Lyrics.

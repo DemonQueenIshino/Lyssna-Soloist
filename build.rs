@@ -3,6 +3,22 @@
 include!("src/ui/icon_pixels.rs");
 
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rerun-if-changed=src/macos_audio.m");
+        cc::Build::new()
+            .file("src/macos_audio.m")
+            .flag("-fobjc-arc")
+            .compile("lyssna_macos_audio");
+        for framework in [
+            "Foundation",
+            "AVFoundation",
+            "CoreMedia",
+            "CoreAudio",
+            "AudioToolbox",
+        ] {
+            println!("cargo:rustc-link-lib=framework={framework}");
+        }
+    }
     println!("cargo:rerun-if-env-changed=LYSSNA_SPICY_LYRICS_KEY");
     println!("cargo:rerun-if-env-changed=SPOTIFLEX_SPICY_LYRICS_KEY");
     println!("cargo:rerun-if-changed=config/spicy-lyrics-client-key.txt");

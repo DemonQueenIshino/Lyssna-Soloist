@@ -3941,6 +3941,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "base64 0.22.1",
+ "cc",
  "cpal",
  "directories",
  "dotenvy",

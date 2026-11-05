@@ -1,6 +1,6 @@
 use librespot_playback::audio_backend::{SinkError, SinkResult};
 use rodio::{
-    OutputStream, OutputStreamBuilder,
+    OutputStreamBuilder,
     cpal::{
         self,
         traits::{DeviceTrait, HostTrait},
@@ -10,6 +10,22 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const DEFAULT_PROBE_INTERVAL: Duration = Duration::from_millis(250);
+
+pub(crate) enum OutputStream {
+    Rodio(rodio::OutputStream),
+    #[cfg(target_os = "macos")]
+    Native(crate::macos_audio::OutputStream),
+}
+
+impl OutputStream {
+    pub(crate) fn mixer(&self) -> &rodio::mixer::Mixer {
+        match self {
+            Self::Rodio(stream) => stream.mixer(),
+            #[cfg(target_os = "macos")]
+            Self::Native(stream) => stream.mixer(),
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum OutputIssue {
@@ -110,6 +126,18 @@ impl OutputChoice {
         }
     }
     fn stream(&self, name: Option<&str>, revision: u64) -> SinkResult<OutputStream> {
+        #[cfg(target_os = "macos")]
+        {
+            let choice = self.clone();
+            match crate::macos_audio::OutputStream::open(name, move || {
+                choice.retry_stream(revision)
+            }) {
+                Ok(stream) => return Ok(OutputStream::Native(stream)),
+                Err(error) => {
+                    log::warn!("Native macOS audio unavailable: {error}; using CoreAudio output")
+                }
+            }
+        }
         let builder = if let Some(name) = name {
             let device = cpal::default_host()
                 .output_devices()
@@ -131,7 +159,7 @@ impl OutputChoice {
             .open_stream_or_fallback()
             .map_err(|_| SinkError::ConnectionRefused("Cannot open audio output".into()))?;
         stream.log_on_drop(false);
-        Ok(stream)
+        Ok(OutputStream::Rodio(stream))
     }
     pub fn open(&self, applied: Option<u64>) -> SinkResult<Option<(OutputStream, u64)>> {
         self.open_with(
@@ -304,12 +332,11 @@ pub(crate) fn test_sound(name: Option<String>) -> anyhow::Result<()> {
         "Invalid audio output"
     );
     let choice = OutputChoice::default();
-    let mut stream = choice.stream(name.as_deref(), 0).map_err(|_| {
+    let stream = choice.stream(name.as_deref(), 0).map_err(|_| {
         anyhow::anyhow!(
             "Cannot test the selected audio output. Refresh outputs and choose an available device."
         )
     })?;
-    stream.log_on_drop(false);
     let sink = rodio::Sink::connect_new(stream.mixer());
     for frequency in [440.0, 660.0] {
         sink.append(
