@@ -1992,7 +1992,7 @@ fn liked_from_collection(action: PlayerAction, context: Option<&str>, user: &str
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PlayerRequest {
     command: String,

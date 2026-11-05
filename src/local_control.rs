@@ -96,9 +96,12 @@ impl<'a> Session<'a> {
             lock(&desktop.0.jam_commands)?.is_none(),
             "Leave the Jam before using local playback control"
         );
-        let request: PlayerRequest = serde_json::from_value(json!({
-            "command":command, "uri":uri, "position_ms":position,
-        }))?;
+        let request = PlayerRequest {
+            command: command.to_owned(),
+            uri: uri.map(str::to_owned),
+            position_ms: Some(position),
+            ..Default::default()
+        };
         player(self.app.clone(), request, Some("native".into()), desktop)
             .map_err(anyhow::Error::msg)
     }
