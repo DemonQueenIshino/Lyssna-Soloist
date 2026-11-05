@@ -97,13 +97,17 @@ int lyssna_audio_ready(void *handle) {
     @autoreleasepool {
         LyssnaAudioOutput *output = (__bridge LyssnaAudioOutput *)handle;
         if (output.renderer.status == AVQueuedSampleBufferRenderingStatusFailed) return -1;
-        if (!output.started) return output.renderer.readyForMoreMediaData ? 1 : 0;
+        if (!output.started) return 1;
         // Pace against the same host clock used to anchor playback. The render
         // clock can lag behind the audio queue while AirPods spatialization
         // starts or changes mode. A 30 ms lead caused every buffer to be late.
         CMTime now = CMTimeSubtract(CMClockGetTime(CMClockGetHostTimeClock()), output.startHostTime);
         CMTime ahead = CMTimeSubtract(output.nextTime, now);
-        return output.renderer.readyForMoreMediaData && CMTimeGetSeconds(ahead) < 0.25 ? 1 : 0;
+        // This is a live PCM feed, not an ahead-of-time decoder. Readiness is
+        // an occupancy hint for non-real-time producers, not a requirement for
+        // enqueueing. Combining its batching with our deadline limit starves
+        // the short queue. The clock limit alone keeps memory and latency bounded.
+        return CMTimeGetSeconds(ahead) < 0.25 ? 1 : 0;
     }
 }
 
@@ -118,6 +122,8 @@ bool lyssna_audio_enqueue(void *handle, const float *samples, size_t frames) {
             // repeatedly enqueueing at the already missed presentation deadline.
             CMTime now = CMTimeSubtract(hostNow, output.startHostTime);
             if (CMTimeCompare(output.nextTime, CMTimeAdd(now, CMTimeMake(1, 20))) < 0) {
+                NSLog(@"Lyssna audio: recovering PCM scheduling stall (lead %.3f s)",
+                    CMTimeGetSeconds(CMTimeSubtract(output.nextTime, now)));
                 output.nextTime = CMTimeAdd(now, CMTimeMake(1, 4));
             }
         }
