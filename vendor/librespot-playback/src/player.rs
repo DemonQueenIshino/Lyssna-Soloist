@@ -55,6 +55,10 @@ const LOAD_HANDLES_POISON_MSG: &str = "load handles mutex should not be poisoned
 
 pub type PlayerResult = Result<(), Error>;
 
+#[path = "audio_analysis.rs"]
+mod audio_analysis;
+pub use audio_analysis::{AudioEnvelope, audio_envelope};
+
 pub struct Player {
     commands: Option<mpsc::UnboundedSender<PlayerCommand>>,
     thread_handle: Option<thread::JoinHandle<()>>,

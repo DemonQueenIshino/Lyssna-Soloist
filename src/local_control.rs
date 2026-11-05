@@ -218,6 +218,20 @@ impl<'a> Session<'a> {
 
     fn action(&mut self, request: &Value) -> Result<Value> {
         let action = request["action"].as_str().context("Action missing")?;
+        if action == "audio-analysis" {
+            let uri = track_uri(request)?;
+            let desktop = self
+                .app
+                .try_state::<Desktop>()
+                .context("Player unavailable")?;
+            let session = desktop.0.controls.session()?;
+            let envelope = librespot_playback::player::audio_envelope(
+                session,
+                librespot_core::SpotifyUri::from_uri(uri)?,
+            )?;
+            return Ok(json!({"uri":uri, "startMs":envelope.start_ms,
+                "stepMs":envelope.step_ms, "durationMs":envelope.duration_ms, "rms":envelope.rms}));
+        }
         if matches!(action, "search" | "track") {
             let desktop = self
                 .app

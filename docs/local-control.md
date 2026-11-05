@@ -53,3 +53,12 @@ calibration sessions promptly. A prior playback queue is not restored.
 Search and metadata replies use the same track shape as state events:
 `uri`, `name`, `artists`, `image`, `duration_ms`. Position is paired with
 `observed_at` in Unix milliseconds so a client can advance the clock while playing.
+
+The ready message's optional `capabilities` list advertises `audio-analysis` when
+source analysis is available. Send `{"type":"request","id":1,"action":"audio-analysis","uri":"spotify:track:0123456789abcdefghijkl"}`
+on a separate authenticated connection to keep playback commands responsive.
+The reply's data contains `uri`, `startMs`, `stepMs` (20), `durationMs` and `rms`.
+RMS values describe up to the first 90 seconds decoded through the normal track
+loader, before output gain. Playback, volume and queue are unchanged. No PCM,
+audio file or credentials are returned. One source analysis runs at a time;
+allow up to 60 seconds for a cold network read. Older builds omit the capability.

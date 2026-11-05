@@ -396,7 +396,7 @@ fn serve(
         let mut writer = stream.try_clone()?;
         if requests {
             writer.set_write_timeout(Some(Duration::from_secs(2)))?;
-            writer.write_all(format!("{}\n", json!({"type":"ready", "protocol":2, "pid":std::process::id(), "windowHandle":window})).as_bytes())?;
+            writer.write_all(format!("{}\n", json!({"type":"ready", "protocol":2, "pid":std::process::id(), "windowHandle":window, "capabilities":["audio-analysis"]})).as_bytes())?;
         }
         writer.write_all(state_line(&shared.state).as_bytes())?;
         if !shared.lyrics.is_empty() {
