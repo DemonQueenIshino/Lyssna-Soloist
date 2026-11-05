@@ -63,13 +63,28 @@ impl From<APLoginFailed> for AuthenticationError {
 }
 
 pub async fn connect(host: &str, port: u16, proxy: Option<&Url>) -> io::Result<Transport> {
+    use futures_util::future::{Either, select};
     const TIMEOUT: Duration = Duration::from_secs(5);
-    tokio::time::timeout(TIMEOUT, {
-        let socket = crate::socket::connect(host, port, proxy).await?;
-        debug!("Connection to AP established.");
-        handshake(socket)
-    })
-    .await?
+    // Lyssna: some networks stall a fresh handshake for ~12 s while a second
+    // connection opened a moment later goes straight through.
+    const HEDGE_AFTER: Duration = Duration::from_millis(1500);
+    let attempt = || async {
+        tokio::time::timeout(TIMEOUT, async {
+            let socket = crate::socket::connect(host, port, proxy).await?;
+            debug!("Connection to AP established.");
+            handshake(socket).await
+        })
+        .await?
+    };
+    let first = Box::pin(attempt());
+    let first = match select(first, Box::pin(tokio::time::sleep(HEDGE_AFTER))).await {
+        Either::Left((result, _)) => return result,
+        Either::Right(((), first)) => first,
+    };
+    match select(first, Box::pin(attempt())).await {
+        Either::Left((Ok(transport), _)) | Either::Right((Ok(transport), _)) => Ok(transport),
+        Either::Left((Err(_), other)) | Either::Right((Err(_), other)) => other.await,
+    }
 }
 
 pub async fn connect_with_retry(
