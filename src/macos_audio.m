@@ -2,19 +2,27 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <CoreAudio/CoreAudio.h>
 #import <CoreMedia/CoreMedia.h>
+#include <stdatomic.h>
 
 // The renderer keeps Control Center in charge of Fixed / Head Tracked / Off.
-@interface LyssnaAudioOutput : NSObject
+@interface LyssnaAudioOutput : NSObject {
+@public
+    atomic_bool needsReset;
+}
 @property(nonatomic, strong) AVSampleBufferAudioRenderer *renderer;
 @property(nonatomic, strong) AVSampleBufferRenderSynchronizer *synchronizer;
 @property(nonatomic) CMAudioFormatDescriptionRef format;
 @property(nonatomic) CMTime nextTime;
 @property(nonatomic) CMTime startHostTime;
 @property(nonatomic) BOOL started;
+@property(nonatomic, strong) NSArray *observers;
 @end
 
 @implementation LyssnaAudioOutput
 - (void)dealloc {
+    for (id observer in _observers) {
+        [[NSNotificationCenter defaultCenter] removeObserver:observer];
+    }
     [_synchronizer setRate:0.0];
     [_renderer flush];
     if (_format) CFRelease(_format);
@@ -63,6 +71,7 @@ void *lyssna_audio_create(const char *name) {
     @autoreleasepool {
         if (@available(macOS 12.0, *)) {
             LyssnaAudioOutput *output = [LyssnaAudioOutput new];
+            atomic_init(&output->needsReset, false);
             output.renderer = [AVSampleBufferAudioRenderer new];
             output.renderer.allowedAudioSpatializationFormats = AVAudioSpatializationFormatMonoAndStereo;
             if (name) {
@@ -87,6 +96,23 @@ void *lyssna_audio_create(const char *name) {
                 sizeof(layout), &layout, 0, NULL, NULL, &format);
             if (status != noErr) return NULL;
             output.format = format;
+            // Notifications can arrive on any thread. Only flag the change
+            // here; flush and enqueue must remain serialized on our worker.
+            __weak LyssnaAudioOutput *weakOutput = output;
+            NSMutableArray *observers = [NSMutableArray new];
+            for (NSNotificationName notification in @[
+                AVSampleBufferAudioRendererWasFlushedAutomaticallyNotification,
+                AVSampleBufferAudioRendererOutputConfigurationDidChangeNotification
+            ]) {
+                id observer = [[NSNotificationCenter defaultCenter]
+                    addObserverForName:notification object:output.renderer queue:nil
+                    usingBlock:^(NSNotification *note) {
+                        LyssnaAudioOutput *current = weakOutput;
+                        if (current) atomic_store_explicit(&current->needsReset, true, memory_order_release);
+                    }];
+                [observers addObject:observer];
+            }
+            output.observers = observers;
             return (__bridge_retained void *)output;
         }
         return NULL;
@@ -96,6 +122,13 @@ void *lyssna_audio_create(const char *name) {
 int lyssna_audio_ready(void *handle) {
     @autoreleasepool {
         LyssnaAudioOutput *output = (__bridge LyssnaAudioOutput *)handle;
+        if (atomic_exchange_explicit(&output->needsReset, false, memory_order_acq_rel)) {
+            [output.synchronizer setRate:0.0 time:kCMTimeZero];
+            [output.renderer flush];
+            output.started = NO;
+            output.nextTime = kCMTimeZero;
+            NSLog(@"Lyssna audio: re-anchoring after output configuration change or automatic flush");
+        }
         if (output.renderer.status == AVQueuedSampleBufferRenderingStatusFailed) return -1;
         if (!output.started) return 1;
         // Pace against the same host clock used to anchor playback. The render
