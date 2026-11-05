@@ -9,6 +9,7 @@
 @property(nonatomic, strong) AVSampleBufferRenderSynchronizer *synchronizer;
 @property(nonatomic) CMAudioFormatDescriptionRef format;
 @property(nonatomic) CMTime nextTime;
+@property(nonatomic) CMTime startHostTime;
 @property(nonatomic) BOOL started;
 @end
 
@@ -96,18 +97,30 @@ int lyssna_audio_ready(void *handle) {
     @autoreleasepool {
         LyssnaAudioOutput *output = (__bridge LyssnaAudioOutput *)handle;
         if (output.renderer.status == AVQueuedSampleBufferRenderingStatusFailed) return -1;
-        // Keep only 30 ms ahead of the device clock, preserving responsive seeks
-        // and the existing mixer's bounded queue and live volume behavior.
-        CMTime ahead = CMTimeSubtract(output.nextTime, output.synchronizer.currentTime);
-        return output.renderer.readyForMoreMediaData && CMTimeGetSeconds(ahead) < 0.03 ? 1 : 0;
+        if (!output.started) return output.renderer.readyForMoreMediaData ? 1 : 0;
+        // Pace against the same host clock used to anchor playback. The render
+        // clock can lag behind the audio queue while AirPods spatialization
+        // starts or changes mode. A 30 ms lead caused every buffer to be late.
+        CMTime now = CMTimeSubtract(CMClockGetTime(CMClockGetHostTimeClock()), output.startHostTime);
+        CMTime ahead = CMTimeSubtract(output.nextTime, now);
+        return output.renderer.readyForMoreMediaData && CMTimeGetSeconds(ahead) < 0.25 ? 1 : 0;
     }
 }
 
 bool lyssna_audio_enqueue(void *handle, const float *samples, size_t frames) {
     @autoreleasepool {
         LyssnaAudioOutput *output = (__bridge LyssnaAudioOutput *)handle;
-        CMTime now = output.synchronizer.currentTime;
-        if (CMTimeCompare(output.nextTime, now) < 0) output.nextTime = now;
+        CMTime hostNow = CMClockGetTime(CMClockGetHostTimeClock());
+        if (!output.started) {
+            output.startHostTime = CMTimeAdd(hostNow, CMTimeMake(1, 4));
+        } else {
+            // Recover from a scheduling stall with usable lead time instead of
+            // repeatedly enqueueing at the already missed presentation deadline.
+            CMTime now = CMTimeSubtract(hostNow, output.startHostTime);
+            if (CMTimeCompare(output.nextTime, CMTimeAdd(now, CMTimeMake(1, 20))) < 0) {
+                output.nextTime = CMTimeAdd(now, CMTimeMake(1, 4));
+            }
+        }
         CMBlockBufferRef block = NULL;
         OSStatus status = CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, NULL, frames * 8,
             kCFAllocatorDefault, NULL, 0, frames * 8, 0, &block);
@@ -129,7 +142,7 @@ bool lyssna_audio_enqueue(void *handle, const float *samples, size_t frames) {
         CFRelease(buffer);
         output.nextTime = CMTimeAdd(output.nextTime, CMTimeMake(frames, 44100));
         if (!output.started) {
-            [output.synchronizer setRate:1.0 time:kCMTimeZero];
+            [output.synchronizer setRate:1.0 time:kCMTimeZero atHostTime:output.startHostTime];
             output.started = YES;
         }
         return output.renderer.status != AVQueuedSampleBufferRenderingStatusFailed;
