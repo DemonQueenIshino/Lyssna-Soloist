@@ -1,6 +1,6 @@
 //! Request/reply playback sessions on the authenticated local control connection.
 use super::{DeckState, DeckTrack, Shared, cover, read_state};
-use crate::desktop::{Desktop, PlayerRequest, lock, player};
+use crate::desktop::{Desktop, PlayerRequest, lock, player_for_local_control};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{
@@ -102,7 +102,7 @@ impl<'a> Session<'a> {
             position_ms: Some(position),
             ..Default::default()
         };
-        player(self.app.clone(), request, Some("native".into()), desktop)
+        player_for_local_control(self.app.clone(), request, Some("native".into()), desktop)
             .map_err(anyhow::Error::msg)
     }
 
@@ -243,9 +243,10 @@ impl<'a> Session<'a> {
                     .as_str()
                     .context("Search query missing")?
                     .trim();
+                // Lyssna's own search takes up to 600 bytes, no control characters.
                 ensure!(
-                    !query.is_empty() && query.len() <= 1024,
-                    "Search query is empty or too long"
+                    !query.is_empty() && query.len() <= 600 && !query.chars().any(char::is_control),
+                    "Search query is empty, too long or has control characters"
                 );
                 let limit = request["limit"].as_u64().unwrap_or(20).clamp(1, 20) as usize;
                 crate::worker::Command::LocalSearch {

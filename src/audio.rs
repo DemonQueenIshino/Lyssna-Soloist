@@ -45,6 +45,10 @@ impl AudioBuffer {
             Ordering::Relaxed,
         );
     }
+    /// Drops a client's temporary output level; true if one was set.
+    pub(crate) fn clear_temporary_volume(&self) -> bool {
+        self.temporary_volume.swap(0, Ordering::Relaxed) != 0
+    }
     /// How long one song fades into the next; 0 plays them back to back.
     pub fn set_crossfade(&self, seconds: u8) {
         self.crossfade_ms
@@ -778,6 +782,23 @@ mod tests {
             "Seek replayed audio from before the pause"
         );
         assert!(audio.is_empty());
+    }
+    #[test]
+    fn a_temporary_level_replaces_the_mixer_until_cleared() {
+        let buffer = AudioBuffer::default();
+        let level = |buffer: &AudioBuffer| {
+            QueuedPacket::with_output(vec![0.5], buffer.clone(), false, Box::new(NoOpVolume))
+                .next()
+                .unwrap()
+        };
+        assert_eq!(level(&buffer), 0.5);
+        buffer.set_temporary_volume(Some(0));
+        assert_eq!(level(&buffer), 0.0);
+        buffer.set_temporary_volume(Some(50));
+        assert_eq!(level(&buffer), 0.25);
+        assert!(buffer.clear_temporary_volume());
+        assert!(!buffer.clear_temporary_volume());
+        assert_eq!(level(&buffer), 0.5);
     }
     #[test]
     fn eof_waits_for_last_spoken_sample() {
