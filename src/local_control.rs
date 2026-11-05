@@ -4,7 +4,7 @@ use crate::desktop::{Desktop, PlayerRequest, lock, player};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{
-    sync::Mutex,
+    sync::{Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -213,16 +213,8 @@ impl<'a> Session<'a> {
                 .app
                 .try_state::<Desktop>()
                 .context("Player unavailable")?;
-            let profile = lock(&desktop.0.snapshot)?
-                .profile
-                .clone()
-                .context("Sign in first")?;
-            let client = reqwest::blocking::Client::builder()
-                .timeout(Duration::from_secs(8))
-                .build()?;
-            let mut spotify =
-                crate::spotify::Spotify::native(client, desktop.0.controls.clone(), profile)?;
-            return if action == "search" {
+            let (reply, response) = mpsc::channel();
+            let command = if action == "search" {
                 let query = request["query"]
                     .as_str()
                     .context("Search query missing")?
@@ -232,17 +224,32 @@ impl<'a> Session<'a> {
                     "Search query is empty or too long"
                 );
                 let limit = request["limit"].as_u64().unwrap_or(20).clamp(1, 20) as usize;
-                let tracks = spotify
-                    .search(query)?
-                    .into_iter()
-                    .filter(|track| valid_uri(&track.uri))
-                    .take(limit)
-                    .map(|track| track_value(&track))
-                    .collect::<Vec<_>>();
-                Ok(Value::Array(tracks))
+                crate::worker::Command::LocalSearch {
+                    query: query.to_owned(),
+                    limit,
+                    reply,
+                }
             } else {
-                let uri = track_uri(request)?;
-                Ok(track_value(&spotify.track(uri)?))
+                crate::worker::Command::LocalTrack {
+                    uri: track_uri(request)?.to_owned(),
+                    reply,
+                }
+            };
+            desktop.0.commands.send(command)?;
+            let tracks = response
+                .recv_timeout(Duration::from_secs(15))
+                .context("Track lookup timed out")?
+                .map_err(anyhow::Error::msg)?;
+            return if action == "search" {
+                Ok(Value::Array(
+                    tracks
+                        .iter()
+                        .filter(|track| valid_uri(&track.uri))
+                        .map(track_value)
+                        .collect(),
+                ))
+            } else {
+                tracks.first().map(track_value).context("Track unavailable")
             };
         }
         ensure!(
@@ -297,10 +304,18 @@ impl<'a> Session<'a> {
             }
             "pause" => {
                 let result = self.control("pause", None, 0);
+                self.calibration = None;
+                thread::sleep(Duration::from_millis(200));
                 self.release_audio();
                 result?;
             }
-            "release" => self.release_audio(),
+            "release" => {
+                if self.calibration.is_some() {
+                    self.finish_calibration()?;
+                } else {
+                    self.release_audio();
+                }
+            }
             "calibrate-start" => {
                 let uri = track_uri(request)?.to_owned();
                 ensure!(self.calibration.is_none(), "Calibration already active");
