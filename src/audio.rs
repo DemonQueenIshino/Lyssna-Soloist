@@ -31,8 +31,20 @@ pub struct AudioBuffer {
     generation: Arc<AtomicUsize>,
     target: Arc<Mutex<Option<String>>>,
     crossfade_ms: Arc<AtomicU32>,
+    temporary_volume: Arc<AtomicU32>,
 }
 impl AudioBuffer {
+    pub(crate) fn same_output(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.temporary_volume, &other.temporary_volume)
+    }
+
+    /// An external client's temporary output level; None follows the user's mixer.
+    pub(crate) fn set_temporary_volume(&self, percent: Option<u8>) {
+        self.temporary_volume.store(
+            percent.map_or(0, |value| u32::from(value.min(100)) + 1),
+            Ordering::Relaxed,
+        );
+    }
     /// How long one song fades into the next; 0 plays them back to back.
     pub fn set_crossfade(&self, seconds: u8) {
         self.crossfade_ms
@@ -339,6 +351,7 @@ struct QueuedPacket {
     marker_applied: bool,
     marker: Option<(Arc<AtomicBool>, bool)>,
     volume: Box<dyn VolumeGetter + Send>,
+    temporary_volume: Option<Arc<AtomicU32>>,
     samples: std::vec::IntoIter<f32>,
     queued: Arc<AtomicUsize>,
     duration: Duration,
@@ -359,6 +372,7 @@ impl QueuedPacket {
         }
         packet.marker = Some((buffer.narration, narration));
         packet.volume = volume;
+        packet.temporary_volume = Some(buffer.temporary_volume);
         packet
     }
     fn new(samples: Vec<f32>, queued: Arc<AtomicUsize>) -> Self {
@@ -374,6 +388,7 @@ impl QueuedPacket {
             marker: None,
             marker_applied: false,
             volume: Box::new(NoOpVolume),
+            temporary_volume: None,
             samples: samples.into_iter(),
             queued,
             duration,
@@ -405,7 +420,16 @@ impl Iterator for QueuedPacket {
         }
         sample.map(|value| {
             if current {
-                value * self.volume.attenuation_factor() as f32
+                let temporary = self
+                    .temporary_volume
+                    .as_ref()
+                    .map_or(0, |volume| volume.load(Ordering::Relaxed));
+                let factor = if temporary == 0 {
+                    self.volume.attenuation_factor() as f32
+                } else {
+                    (temporary - 1) as f32 / 100.0
+                };
+                value * factor
             } else {
                 0.0
             }

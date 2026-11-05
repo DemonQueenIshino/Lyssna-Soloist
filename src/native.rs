@@ -200,6 +200,15 @@ struct QueueEntry {
 pub struct NativeControls(Arc<Mutex<Option<ControlConnection>>>);
 
 impl NativeControls {
+    pub(crate) fn audio_buffer(&self) -> Result<crate::audio::AudioBuffer> {
+        self.0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Native session unavailable"))?
+            .as_ref()
+            .map(|connection| connection.audio_buffer.clone())
+            .context("Local audio is not connected")
+    }
+
     /// Capture this account's connection so background work cannot switch accounts.
     pub(crate) fn scoped(&self, account: &str) -> Result<Self> {
         let connection = self
