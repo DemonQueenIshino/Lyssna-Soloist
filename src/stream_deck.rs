@@ -22,6 +22,9 @@ use std::{
 };
 use tauri::{Listener, Manager};
 
+#[path = "local_control.rs"]
+mod local_control;
+
 /// Longest line a client may send; commands are a few dozen bytes.
 const MAX_LINE: usize = 4096;
 /// How long a new connection has to send the key.
@@ -89,6 +92,7 @@ struct DeckLine {
 
 #[derive(Default)]
 struct Shared {
+    audio_owner: Option<u64>,
     /// Connected plugins, by connection number.
     clients: Vec<(u64, TcpStream)>,
     next_client: u64,
@@ -110,7 +114,10 @@ pub(super) fn start(app: tauri::AppHandle) -> Result<()> {
     let key: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
     let path = crate::config::data_dir()?.join("stream-deck.json");
     std::fs::create_dir_all(path.parent().context("No application data folder")?)?;
-    std::fs::write(&path, json!({"port": port, "key": key}).to_string())?;
+    std::fs::write(
+        &path,
+        json!({"port": port, "key": key, "protocol": 2}).to_string(),
+    )?;
 
     let shared = Arc::new(Mutex::new(Shared::default()));
     // Liked Songs status arrives with the app's own library events.
@@ -367,6 +374,17 @@ fn serve(
         "Wrong Stream Deck key"
     );
     reader.get_ref().set_read_timeout(None)?;
+    let requests = hello["protocol"].as_u64().unwrap_or(1) >= 2;
+    #[cfg(windows)]
+    let window = if requests {
+        app.get_webview_window("main")
+            .and_then(|window| window.hwnd().ok())
+            .map(|handle| handle.0 as usize)
+    } else {
+        None
+    };
+    #[cfg(not(windows))]
+    let window: Option<usize> = None;
     let id = {
         let mut shared = shared
             .lock()
@@ -376,6 +394,10 @@ fn serve(
             "Too many Stream Deck connections"
         );
         let mut writer = stream.try_clone()?;
+        if requests {
+            writer.set_write_timeout(Some(Duration::from_secs(2)))?;
+            writer.write_all(format!("{}\n", json!({"type":"ready", "protocol":2, "pid":std::process::id(), "windowHandle":window, "capabilities":["audio-analysis"]})).as_bytes())?;
+        }
         writer.write_all(state_line(&shared.state).as_bytes())?;
         if !shared.lyrics.is_empty() {
             writer.write_all(shared.lyrics.as_bytes())?;
@@ -385,19 +407,32 @@ fn serve(
         shared.clients.push((id, writer));
         id
     };
+    let mut control = local_control::Session::new(app, shared, id);
     let result = (|| -> Result<()> {
         loop {
             let line = read_line(&mut reader)?;
             let Ok(message) = serde_json::from_str::<Value>(&line) else {
                 continue;
             };
-            if message["type"] == "command"
+            if requests && message["type"] == "request" {
+                let response = control.execute(&message);
+                let mut shared = shared
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("State unavailable"))?;
+                let (_, writer) = shared
+                    .clients
+                    .iter_mut()
+                    .find(|(client, _)| *client == id)
+                    .context("Local control client disconnected")?;
+                writer.write_all(format!("{response}\n").as_bytes())?;
+            } else if message["type"] == "command"
                 && let Some(name) = message["command"].as_str()
             {
                 let _ = run(app, shared, name, &message);
             }
         }
     })();
+    drop(control);
     // A plugin that leaves is dropped at once, not at the next update.
     if let Ok(mut shared) = shared.lock() {
         shared.clients.retain(|(client, _)| *client != id);

@@ -1992,7 +1992,23 @@ fn liked_from_collection(action: PlayerAction, context: Option<&str>, user: &str
     }
 }
 
-#[derive(Deserialize)]
+thread_local! {
+    /// Set while a local control client's own request runs through `player`.
+    static LOCAL_CONTROL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// `player` for a local control client, whose own songs keep its quiet output.
+fn player_for_local_control(
+    app: tauri::AppHandle,
+    request: PlayerRequest,
+    target: Option<String>,
+    state: State<'_, Desktop>,
+) -> std::result::Result<(), String> {
+    LOCAL_CONTROL.set(true);
+    let result = player(app, request, target, state);
+    LOCAL_CONTROL.set(false);
+    result
+}
+#[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PlayerRequest {
     command: String,
@@ -2105,6 +2121,25 @@ fn player(
         let mut snapshot = lock(&state.0.snapshot)?;
         ensure!(snapshot.profile.is_some(), "Sign in first");
         let mut action = request.action()?;
+        // A song picked here outranks a local client's silent playback.
+        if !LOCAL_CONTROL.get()
+            && matches!(
+                action,
+                PlayerAction::Play(Some(_))
+                    | PlayerAction::PlayContext { .. }
+                    | PlayerAction::PlayUris { .. }
+                    | PlayerAction::Next
+                    | PlayerAction::Previous
+                    | PlayerAction::SkipTo(_)
+            )
+            && state
+                .0
+                .controls
+                .audio_buffer()
+                .is_ok_and(|output| output.clear_temporary_volume())
+        {
+            native::diagnostic("a song picked in Lyssna ended a local client's quiet playback");
+        }
         let native_context = matches!(request.command.as_str(), "dj" | "play_home");
         let local = plays_locally(
             &request.command,
@@ -2866,6 +2901,16 @@ async fn jam(
                 ));
                 *current = next;
             }
+        }
+        // Jam songs come from the host, so they never end a local client's quiet output.
+        if matches!(action.as_str(), "start" | "join")
+            && matches!(result, Ok(Some(_)))
+            && inner
+                .controls
+                .audio_buffer()
+                .is_ok_and(|output| output.clear_temporary_volume())
+        {
+            crate::native::diagnostic("joining a Jam ended a local client's quiet playback");
         }
         result
     })

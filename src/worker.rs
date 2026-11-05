@@ -19,6 +19,15 @@ use crate::{
 };
 
 pub enum Command {
+    LocalSearch {
+        query: String,
+        limit: usize,
+        reply: mpsc::Sender<std::result::Result<Vec<Track>, String>>,
+    },
+    LocalTrack {
+        uri: String,
+        reply: mpsc::Sender<std::result::Result<Vec<Track>, String>>,
+    },
     PrefetchPage(String),
     Restore(String),
     Login(String, Arc<AtomicBool>),
@@ -1280,6 +1289,26 @@ impl Backend {
                         message: error.to_string(),
                     }),
                 }
+            }
+            Command::LocalSearch {
+                query,
+                limit,
+                reply,
+            } => {
+                let result = self
+                    .api()
+                    .and_then(|api| api.search(&query))
+                    .map(|tracks| tracks.into_iter().take(limit).collect())
+                    .map_err(|error| error.to_string());
+                let _ = reply.send(result);
+            }
+            Command::LocalTrack { uri, reply } => {
+                let result = self
+                    .api()
+                    .and_then(|api| api.track(&uri))
+                    .map(|track| vec![track])
+                    .map_err(|error| error.to_string());
+                let _ = reply.send(result);
             }
             Command::Player { action, device } => {
                 let queued = matches!(action, PlayerAction::Enqueue(_));
