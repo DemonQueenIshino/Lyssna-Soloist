@@ -123,11 +123,24 @@ int lyssna_audio_ready(void *handle) {
     @autoreleasepool {
         LyssnaAudioOutput *output = (__bridge LyssnaAudioOutput *)handle;
         if (atomic_exchange_explicit(&output->needsReset, false, memory_order_acq_rel)) {
-            [output.synchronizer setRate:0.0 time:kCMTimeZero];
             [output.renderer flush];
-            output.started = NO;
-            output.nextTime = kCMTimeZero;
-            NSLog(@"Lyssna audio: re-anchoring after output configuration change or automatic flush");
+            CMTime mediaNow = output.synchronizer.currentTime;
+            if (output.started && CMTIME_IS_NUMERIC(mediaNow) && output.synchronizer.rate == 1.0) {
+                // Keep the active timeline through spatial mode changes. A
+                // stop/restart briefly withdraws availability in Control Center.
+                // Rebase pacing to the updated device clock instead, then feed
+                // the running renderer with the same bounded presentation lead.
+                CMTime hostNow = CMClockGetTime(CMClockGetHostTimeClock());
+                output.startHostTime = CMTimeSubtract(hostNow, mediaNow);
+                output.nextTime = CMTimeAdd(mediaNow, CMTimeMake(1, 4));
+                NSLog(@"Lyssna audio: continuing timeline after output configuration change or automatic flush");
+            } else {
+                // An interrupted or uninitialized clock still needs a full start.
+                [output.synchronizer setRate:0.0 time:kCMTimeZero];
+                output.started = NO;
+                output.nextTime = kCMTimeZero;
+                NSLog(@"Lyssna audio: restarting unavailable output clock");
+            }
         }
         if (output.renderer.status == AVQueuedSampleBufferRenderingStatusFailed) return -1;
         if (!output.started) return 1;
