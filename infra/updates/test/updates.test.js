@@ -66,3 +66,16 @@ test("only a signed manifest with an uploaded artifact can activate the channel"
   assert.equal(await response.text(), signed);
   assert.equal(response.headers.get("Cache-Control"), "public, max-age=60");
 });
+
+test("each channel only activates its own executable name", async () => {
+  const { put, envelope } = setup();
+  const lyssna = "releases/0.3.1/windows-x86_64/lyssna.exe";
+  const legacy = "releases/0.3.1/windows-x86_64/spotiflex.exe";
+  await put(lyssna, "binary");
+  await put(legacy, "binary");
+  const release = (artifact) => envelope({ version: "0.3.1", target: "windows-x86_64", artifact, size: 6, sha256: "a".repeat(64), notes: "Test release" });
+  assert.equal((await put("channels/stable/lyssna-windows-x86_64.json", release(legacy))).status, 400);
+  assert.equal((await put("channels/stable/windows-x86_64.json", release(lyssna))).status, 400);
+  assert.equal((await put("channels/stable/lyssna-windows-x86_64.json", release(lyssna))).status, 201);
+  assert.equal((await put("channels/stable/windows-x86_64.json", release(legacy))).status, 201);
+});

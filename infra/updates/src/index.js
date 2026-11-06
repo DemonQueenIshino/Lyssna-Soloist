@@ -1,7 +1,11 @@
 // @ts-check
 
-const artifact = /^releases\/\d+\.\d+\.\d+\/windows-x86_64\/(spotiflex\.exe|source\.zip)$/;
-const channel = /^channels\/stable\/windows-x86_64\.json$/;
+const artifact = /^releases\/\d+\.\d+\.\d+\/windows-x86_64\/(lyssna\.exe|spotiflex\.exe|source\.zip)$/;
+// Copies from before the rename read the old channel and only accept spotiflex.exe.
+const channels = new Map([
+  ["channels/stable/lyssna-windows-x86_64.json", "lyssna.exe"],
+  ["channels/stable/windows-x86_64.json", "spotiflex.exe"],
+]);
 
 /** @param {string} value */
 function decode(value) {
@@ -24,7 +28,8 @@ async function authorized(request, token) {
 async function publish(request, env, key) {
   if (!(await authorized(request, env.PUBLISH_TOKEN))) return new Response("Unauthorized", { status: 401 });
   const size = Number(request.headers.get("Content-Length"));
-  const manifest = channel.test(key);
+  const executable = channels.get(key);
+  const manifest = executable !== undefined;
   if (!Number.isSafeInteger(size) || size <= 0 || size > (manifest ? 65536 : 512 * 1024 * 1024)) {
     return new Response("Invalid content length", { status: 413 });
   }
@@ -38,7 +43,7 @@ async function publish(request, env, key) {
       const verificationKey = await crypto.subtle.importKey("raw", decode(env.UPDATE_PUBLIC_KEY), "Ed25519", false, ["verify"]);
       if (!(await crypto.subtle.verify("Ed25519", verificationKey, decode(envelope.signature), payload))) return new Response("Invalid signature", { status: 400 });
       const release = JSON.parse(new TextDecoder().decode(payload));
-      if (!/^\d+\.\d+\.\d+$/.test(release.version) || release.target !== "windows-x86_64" || release.artifact !== `releases/${release.version}/windows-x86_64/spotiflex.exe` || !/^[a-fA-F0-9]{64}$/.test(release.sha256)) return new Response("Invalid release", { status: 400 });
+      if (!/^\d+\.\d+\.\d+$/.test(release.version) || release.target !== "windows-x86_64" || release.artifact !== `releases/${release.version}/windows-x86_64/${executable}` || !/^[a-fA-F0-9]{64}$/.test(release.sha256)) return new Response("Invalid release", { status: 400 });
       const object = await env.RELEASES.head(release.artifact);
       if (!object || object.size !== release.size) return new Response("Upload executable first", { status: 409 });
       await env.RELEASES.put(key, text, { httpMetadata: { contentType: "application/json", cacheControl: "public, max-age=60" } });
@@ -60,7 +65,7 @@ export default {
     if (url.pathname === "/health" && request.method === "GET") return Response.json({ service: "spotiflex-updates", status: "ok" });
     const publishing = url.pathname.startsWith("/publish/");
     const key = url.pathname.slice(publishing ? "/publish/".length : 1);
-    if (!artifact.test(key) && !channel.test(key)) return new Response("Not found", { status: 404 });
+    if (!artifact.test(key) && !channels.has(key)) return new Response("Not found", { status: 404 });
     if (publishing) {
       if (request.method !== "PUT") return new Response("Method not allowed", { status: 405, headers: { Allow: "PUT" } });
       return publish(request, env, key);
@@ -72,7 +77,7 @@ export default {
     object.writeHttpMetadata(headers);
     headers.set("ETag", object.httpEtag);
     headers.set("Content-Length", String(object.size));
-    headers.set("Cache-Control", channel.test(key) ? "public, max-age=60" : "public, max-age=31536000, immutable");
+    headers.set("Cache-Control", channels.has(key) ? "public, max-age=60" : "public, max-age=31536000, immutable");
     if (request.headers.get("If-None-Match") === object.httpEtag) return new Response(null, { status: 304, headers });
     return new Response("body" in object && object.body instanceof ReadableStream ? object.body : null, { headers });
   },
