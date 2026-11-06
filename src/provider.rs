@@ -218,13 +218,7 @@ pub fn resolve_contributors(lyrics: &mut Lyrics) {
     let Some(attribution) = lyrics.attribution.as_mut() else {
         return;
     };
-    // The site answers requests without a User-Agent with a captcha.
-    let Ok(client) = Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent(concat!("Lyssna/", env!("CARGO_PKG_VERSION")))
-        .build()
-    else {
+    let Ok(client) = crate::chrome_release::site_client(std::time::Duration::from_secs(5)) else {
         return;
     };
     for person in [attribution.maker.as_mut(), attribution.uploader.as_mut()]
@@ -323,10 +317,7 @@ pub fn creator_profile(id: &str) -> Result<Url> {
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
         "Invalid creator identity"
     );
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+    let client = crate::chrome_release::site_client(std::time::Duration::from_secs(5))?;
     let mut url = Url::parse("https://spicylyrics.org/uid/")?;
     url.path_segments_mut()
         .map_err(|_| anyhow::anyhow!("Invalid creator path"))?

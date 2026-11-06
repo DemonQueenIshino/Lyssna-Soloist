@@ -14,6 +14,7 @@ pub mod auth;
 pub mod autostart;
 pub mod canvas;
 pub mod catalogue;
+pub mod chrome_release;
 pub mod collection;
 pub mod config;
 pub mod credential;
