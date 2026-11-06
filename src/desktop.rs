@@ -3837,6 +3837,18 @@ const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreen
 /// profile reached without it, after the site's verification check or a
 /// `/uid/` link, is opened again with it.
 const PROFILE_WINDOW_SCRIPT: &str = r#"(() => {
+  // The site's script sends any page that finds WebView2's
+  // `chrome.webview` to its retired /embed page. The window uses no IPC.
+  try {
+    const chrome = window.chrome;
+    if (chrome && "webview" in chrome) {
+      const visible = Object.create(Object.getPrototypeOf(chrome));
+      for (const key of Reflect.ownKeys(chrome)) {
+        if (key !== "webview") Object.defineProperty(visible, key, Object.getOwnPropertyDescriptor(chrome, key));
+      }
+      Object.defineProperty(window, "chrome", { configurable: true, writable: true, enumerable: true, value: visible });
+    }
+  } catch {}
   const fonts = document.createElement("style");
   fonts.textContent = PROFILE_FONTS;
   const addFonts = () => (document.head || document.documentElement).appendChild(fonts);
