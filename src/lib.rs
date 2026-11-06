@@ -48,6 +48,7 @@ pub mod rename;
 pub mod resume;
 pub mod search;
 pub mod soloist;
+pub mod soloist_link;
 pub mod spotify;
 pub mod track_facts;
 #[cfg(feature = "legacy-ui")]

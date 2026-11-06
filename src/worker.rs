@@ -219,6 +219,8 @@ pub enum Event {
         message: String,
     },
     Playback(Box<Playback>, Instant),
+    /// Spotify Soloist's own report, sent as it changes.
+    SoloistPlayback(Box<Playback>),
     Devices(Vec<Device>),
     Notice(String),
     Error(String),
@@ -228,6 +230,7 @@ pub struct Worker {
     pub native_controls: NativeControls,
     pub commands: mpsc::Sender<Command>,
     pub events: mpsc::Receiver<Event>,
+    pub events_in: mpsc::Sender<Event>,
     pub native_events: mpsc::Receiver<NativeMessage>,
     pub lyrics: mpsc::Sender<LyricCommand>,
     pub lyric_events: mpsc::Receiver<LyricEvent>,
@@ -274,6 +277,7 @@ impl Worker {
         let (commands, receive_commands) = mpsc::channel();
         let login_results = commands.clone();
         let (send_events, events) = mpsc::channel();
+        let events_in = send_events.clone();
         let (send_native, native_events) = mpsc::channel();
         let (lyrics, receive_lyrics) = mpsc::channel();
         let (send_lyrics, lyric_events) = mpsc::channel();
@@ -585,6 +589,7 @@ impl Worker {
             native_controls,
             commands,
             events,
+            events_in,
             native_events,
             lyrics,
             lyric_events,

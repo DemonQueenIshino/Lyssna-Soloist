@@ -87,6 +87,10 @@ fn root() -> Result<PathBuf> {
     Ok(crate::config::data_dir()?.join("soloist"))
 }
 
+pub fn data_dir() -> Result<PathBuf> {
+    Ok(root()?.join("data"))
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct Release {
     etag: String,

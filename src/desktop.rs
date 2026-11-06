@@ -116,6 +116,10 @@ struct Inner {
     soloist_device: Mutex<Option<String>>,
     /// Move playback to Soloist as soon as it is ready.
     soloist_takeover: AtomicBool,
+    soloist_link: Mutex<Option<crate::soloist_link::Link>>,
+    /// Soloist is the active device and reports its playback itself.
+    soloist_playing: Arc<AtomicBool>,
+    events_in: mpsc::Sender<Event>,
 }
 pub struct Desktop(Arc<Inner>);
 fn restore_playback(snapshot: &mut Snapshot, value: crate::resume::LastPlayed) {
@@ -177,12 +181,52 @@ fn set_soloist(inner: &Inner, wanted: bool) {
     };
     if wanted && slot.is_none() {
         *slot = Some(crate::soloist::Supervisor::start());
+        if let (Ok(data), Ok(mut link)) = (crate::soloist::data_dir(), inner.soloist_link.lock()) {
+            let (events, playing) = (inner.events_in.clone(), inner.soloist_playing.clone());
+            *link = Some(crate::soloist_link::Link::start(data, move |state| {
+                playing.store(state.active, Ordering::Release);
+                let _ = events.send(Event::SoloistPlayback(Box::new(soloist_playback(state))));
+            }));
+        }
     } else if !wanted && let Some(supervisor) = slot.take() {
         drop(slot);
         drop(supervisor);
+        if let Ok(mut link) = inner.soloist_link.lock() {
+            *link = None;
+        }
+        inner.soloist_playing.store(false, Ordering::Release);
         if let Ok(mut device) = inner.soloist_device.lock() {
             *device = None;
         }
+    }
+}
+
+fn soloist_playback(state: crate::soloist_link::State) -> crate::model::Playback {
+    let elapsed = if state.playing && state.measured_at > 0 {
+        (now_ms() as i64).saturating_sub(state.measured_at).max(0) as u64
+    } else {
+        0
+    };
+    crate::model::Playback {
+        progress_ms: state.track.as_ref().map(|track| {
+            let position = state.position_ms.saturating_add(elapsed);
+            if track.duration_ms > 0 {
+                position.min(track.duration_ms)
+            } else {
+                position
+            }
+        }),
+        item: state.track,
+        is_playing: state.playing,
+        shuffle_state: state.shuffle,
+        repeat_state: state.repeat,
+        device: Device {
+            name: crate::soloist::DEVICE_NAME.into(),
+            is_active: state.active,
+            volume_percent: state.volume,
+            ..Device::default()
+        },
+        context: state.context,
     }
 }
 
@@ -481,6 +525,9 @@ impl Desktop {
             soloist: Mutex::new(None),
             soloist_device: Mutex::new(None),
             soloist_takeover: AtomicBool::new(false),
+            soloist_link: Mutex::new(None),
+            soloist_playing: Arc::new(AtomicBool::new(false)),
+            events_in: worker.events_in.clone(),
         });
         sync_soloist(&inner);
         watch_soloist(inner.clone(), app.clone());
@@ -835,7 +882,24 @@ impl Desktop {
                         Event::LibraryFolders(folders) => {
                             emit(json!({"type":"library_folders","folders":folders}));
                         }
-                        Event::Playback(mut playback, _observed) => {
+                        event @ (Event::Playback(..) | Event::SoloistPlayback(_)) => {
+                            let mut playback = match event {
+                                // Soloist's own reports are current; polled
+                                // ones lag behind it.
+                                Event::Playback(playback, _)
+                                    if !pump.soloist_playing.load(Ordering::Acquire) =>
+                                {
+                                    playback
+                                }
+                                Event::SoloistPlayback(mut playback)
+                                    if playback.device.is_active =>
+                                {
+                                    playback.device.id =
+                                        pump.soloist_device.lock().ok().and_then(|id| id.clone());
+                                    playback
+                                }
+                                _ => continue,
+                            };
                             if snapshot.native_ready
                                 && playback.device.name == native::device_name()
                             {
@@ -2280,7 +2344,22 @@ fn player(
             &snapshot.playback.device,
         );
         // With Soloist on, Soloist is this computer's player.
-        let (local, target) = if local && snapshot.settings.soloist && request.command != "dj" {
+        let soloist = local && snapshot.settings.soloist && request.command != "dj";
+        if soloist
+            && state.0.soloist_playing.load(Ordering::Acquire)
+            && lock(&state.0.soloist_link)?
+                .as_ref()
+                .is_some_and(|link| link.send(&action))
+        {
+            if matches!(action, PlayerAction::Enqueue(_)) {
+                let _ = app.emit(
+                    "lyssna",
+                    json!({"type":"notice","message":"Added to queue","error":false}),
+                );
+            }
+            return Ok(());
+        }
+        let (local, target) = if soloist {
             let id = lock(&state.0.soloist_device)?
                 .clone()
                 .context("Spotify Soloist is still starting. Try again in a moment.")?;
