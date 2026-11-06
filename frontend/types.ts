@@ -226,6 +226,7 @@ export interface Settings {
   cinema_lyrics?: boolean;
   crossfade?: boolean;
   crossfade_seconds?: number;
+  soloist?: boolean;
   lyrics_discord_usernames?: boolean;
   lyrics_profiles_in_browser?: boolean;
   audio_output?: string | null;
@@ -348,6 +349,10 @@ export interface Snapshot {
   native_ready: boolean;
   local_device_name: string;
   native_status: string;
+  /** Spotify Soloist's state while it is switched on. */
+  soloist?: SoloistStatus | null;
+  /** Spotify refused this account's audio keys to Lyssna's player. */
+  keys_refused?: boolean;
   provider_configured: boolean;
   provider_builtin?: boolean;
   provider_kind?: "spicy" | "legacy";
@@ -461,6 +466,11 @@ export type AppEvent =
   | { type: "signed_out" | "login_finished" }
   | { type: "provider_configured"; kind?: "spicy" | "legacy" }
   | { type: "native"; ready: boolean; status: string }
+  | {
+      type: "soloist";
+      status?: SoloistStatus | null;
+      keys_refused: boolean;
+    }
   | { type: "library"; playlists: Playlist[] }
   | { type: "library_folders"; folders: LibraryFolder[] }
   | {
@@ -556,3 +566,8 @@ export interface NightlyReport {
   finished: boolean;
   log: string | null;
 }
+
+export type SoloistStatus =
+  | { state: "unsupported" | "needs_key" | "installing" | "starting" }
+  | { state: "needs_pairing" | "ready" }
+  | { state: "failed"; message: string };

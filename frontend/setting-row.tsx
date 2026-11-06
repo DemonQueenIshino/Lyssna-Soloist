@@ -27,6 +27,7 @@ export function SettingRow({
   keywords,
   stacked = false,
   hideId,
+  unavailable,
   children,
 }: {
   label: ReactNode;
@@ -35,6 +36,8 @@ export function SettingRow({
   stacked?: boolean;
   /** Lets the row be hidden; set by the settings window. */
   hideId?: string;
+  /** Greys the row out and says why it does nothing right now. */
+  unavailable?: string;
   children?: ReactNode;
 }) {
   const query = useContext(SettingsQuery);
@@ -45,7 +48,9 @@ export function SettingRow({
   if (!matchesSetting(query, ...text, keywords)) return null;
   if (hideId && hiding.allow && hiding.hidden.has(hideId)) return null;
   return (
-    <div className={`setting-row ${stacked ? "stacked" : ""}`}>
+    <div
+      className={`setting-row ${stacked ? "stacked" : ""} ${unavailable ? "unavailable" : ""}`}
+    >
       <div className="setting-text">
         <span className="setting-label">
           {label}
@@ -60,9 +65,12 @@ export function SettingRow({
           )}
         </span>
         {help && <p className="setting-help">{help}</p>}
+        {unavailable && <p className="setting-unavailable">{unavailable}</p>}
       </div>
       {children !== undefined && (
-        <div className="setting-control">{children}</div>
+        <div className="setting-control" inert={!!unavailable}>
+          {children}
+        </div>
       )}
     </div>
   );

@@ -53,6 +53,10 @@ pub struct Snapshot {
     native_ready: bool,
     local_device_name: String,
     native_status: String,
+    /// Spotify Soloist's state while it is switched on.
+    soloist: Option<crate::soloist::Status>,
+    /// Spotify refused this account's audio keys to Lyssna's engine.
+    keys_refused: bool,
     provider_configured: bool,
     provider_builtin: bool,
     provider_kind: Option<String>,
@@ -107,6 +111,11 @@ struct Inner {
     update_commands: mpsc::Sender<updater::Command>,
     available: Mutex<Option<updater::Update>>,
     ready_update: Mutex<Option<updater::ReadyUpdate>>,
+    soloist: Mutex<Option<crate::soloist::Supervisor>>,
+    /// Soloist's Spotify Connect device ID once it shows up signed in.
+    soloist_device: Mutex<Option<String>>,
+    /// Move playback to Soloist as soon as it is ready.
+    soloist_takeover: AtomicBool,
 }
 pub struct Desktop(Arc<Inner>);
 fn restore_playback(snapshot: &mut Snapshot, value: crate::resume::LastPlayed) {
@@ -151,6 +160,106 @@ fn targets_local_device(target: Option<&str>, native_id: Option<&str>, device: &
         || target.is_some_and(|target| Some(target) == native_id)
         || device.name == native::device_name()
             && (target.is_none() || target == device.id.as_deref())
+}
+
+/// Starts or stops Spotify Soloist to match the setting.
+fn sync_soloist(inner: &Inner) {
+    let wanted = inner
+        .snapshot
+        .lock()
+        .is_ok_and(|snapshot| snapshot.settings.soloist);
+    set_soloist(inner, wanted);
+}
+
+fn set_soloist(inner: &Inner, wanted: bool) {
+    let Ok(mut slot) = inner.soloist.lock() else {
+        return;
+    };
+    if wanted && slot.is_none() {
+        *slot = Some(crate::soloist::Supervisor::start());
+    } else if !wanted && let Some(supervisor) = slot.take() {
+        drop(slot);
+        drop(supervisor);
+        if let Ok(mut device) = inner.soloist_device.lock() {
+            *device = None;
+        }
+    }
+}
+
+/// Reports Soloist's state, learns its device ID and moves playback to it
+/// when Spotify refused this account's keys.
+fn watch_soloist(inner: Arc<Inner>, app: tauri::AppHandle) {
+    thread::spawn(move || {
+        let mut looked_up: Option<Instant> = None;
+        while !inner.stopped.load(Ordering::Relaxed) {
+            let status = inner
+                .soloist
+                .lock()
+                .ok()
+                .and_then(|slot| slot.as_ref().map(|supervisor| supervisor.status()));
+            let ready = status == Some(crate::soloist::Status::Ready);
+            if let Ok(mut snapshot) = inner.snapshot.lock()
+                && snapshot.soloist != status
+            {
+                snapshot.soloist = status.clone();
+                let _ = app.emit(
+                    "lyssna",
+                    json!({"type":"soloist","status":status,"keys_refused":snapshot.keys_refused}),
+                );
+            }
+            let known = inner.soloist_device.lock().is_ok_and(|id| id.is_some());
+            if ready
+                && (!known || looked_up.is_none_or(|at| at.elapsed() > Duration::from_secs(60)))
+            {
+                looked_up = Some(Instant::now());
+                let id = inner.controls.devices().ok().and_then(|devices| {
+                    devices
+                        .into_iter()
+                        .find(|device| device.name == crate::soloist::DEVICE_NAME)
+                        .and_then(|device| device.id)
+                });
+                if let Ok(mut device) = inner.soloist_device.lock() {
+                    *device = id;
+                }
+            }
+            if !ready {
+                looked_up = None;
+            }
+            let device = inner.soloist_device.lock().ok().and_then(|id| id.clone());
+            if let Some(id) = device.filter(|_| ready)
+                && inner.soloist_takeover.swap(false, Ordering::AcqRel)
+            {
+                take_over(&inner, &app, &id);
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+    });
+}
+
+/// Moves what was playing to Soloist and plays it there.
+fn take_over(inner: &Inner, app: &tauri::AppHandle, id: &str) {
+    let resume = inner.snapshot.lock().ok().and_then(|snapshot| {
+        snapshot.playback.item.as_ref().map(|track| {
+            (
+                track.uri.clone(),
+                snapshot.playback.progress_ms.unwrap_or(0),
+            )
+        })
+    });
+    let moved = inner
+        .controls
+        .remote_action(PlayerAction::Transfer(id.to_owned()), None)
+        .and_then(|()| match resume {
+            Some((uri, _)) => inner
+                .controls
+                .remote_action(PlayerAction::Play(Some(uri)), Some(id)),
+            None => Ok(()),
+        });
+    let message = match moved {
+        Ok(()) => "Playing through Spotify Soloist.".to_owned(),
+        Err(error) => format!("Couldn't move playback to Spotify Soloist: {error:#}"),
+    };
+    let _ = app.emit("lyssna", json!({"type":"notice","message":message}));
 }
 
 /// DJ narration exists only in this computer's player; every other command,
@@ -323,6 +432,8 @@ impl Desktop {
                 native_ready: false,
                 local_device_name: native::device_name(),
                 native_status: "Waiting for sign-in".into(),
+                soloist: None,
+                keys_refused: false,
                 provider_configured: crate::provider::configured(),
                 provider_builtin: crate::provider::builtin_configured(),
                 provider_kind: crate::provider::kind(),
@@ -367,7 +478,12 @@ impl Desktop {
             update_commands: updates.commands.clone(),
             available: Mutex::new(None),
             ready_update: Mutex::new(None),
+            soloist: Mutex::new(None),
+            soloist_device: Mutex::new(None),
+            soloist_takeover: AtomicBool::new(false),
         });
+        sync_soloist(&inner);
+        watch_soloist(inner.clone(), app.clone());
         inner.commands.send(Command::NativeLogin {
             restoring: true,
             cancelled: lock(&inner.login_cancelled)?.clone(),
@@ -1204,6 +1320,22 @@ impl Desktop {
                         NativeEvent::ControlError(message) => emit(
                             json!({"type":"notice","message":message,"error":true,"stalled":true}),
                         ),
+                        NativeEvent::KeysRefused => {
+                            snapshot.keys_refused = true;
+                            if snapshot.settings.soloist {
+                                pump.soloist_takeover.store(true, Ordering::Release);
+                                emit(
+                                    json!({"type":"notice","message":"Spotify refused this account here, so Lyssna is switching to Spotify Soloist."}),
+                                );
+                            } else {
+                                emit(
+                                    json!({"type":"notice","message":native::KEYS_REFUSED,"error":true,"stalled":true}),
+                                );
+                            }
+                            emit(
+                                json!({"type":"soloist","status":snapshot.soloist,"keys_refused":true}),
+                            );
+                        }
                         NativeEvent::Position {
                             uri,
                             position_ms,
@@ -2147,6 +2279,18 @@ fn player(
             lock(&state.0.native_id)?.as_deref(),
             &snapshot.playback.device,
         );
+        // With Soloist on, Soloist is this computer's player.
+        let (local, target) = if local && snapshot.settings.soloist && request.command != "dj" {
+            let id = lock(&state.0.soloist_device)?
+                .clone()
+                .context("Spotify Soloist is still starting. Try again in a moment.")?;
+            if matches!(action, PlayerAction::Transfer(_)) {
+                action = PlayerAction::Transfer(id.clone());
+            }
+            (false, Some(id))
+        } else {
+            (local, target)
+        };
         if request.command != "volume" {
             native::diagnostic(&format!(
                 "click {}: {}",
@@ -2633,10 +2777,27 @@ fn save_settings(
         // Every window shows the same settings, so a change made in the
         // Cinema or popout window reaches the main one and the reverse.
         let _ = app.emit("lyssna", json!({"type":"settings","settings":&settings}));
+        let soloist = settings.soloist;
+        let takeover = soloist && !snapshot.settings.soloist && snapshot.keys_refused;
         snapshot.settings = settings;
+        drop(snapshot);
+        set_soloist(&state.0, soloist);
+        if takeover {
+            state.0.soloist_takeover.store(true, Ordering::Release);
+        }
         Ok(())
     };
     result().map_err(error)
+}
+#[tauri::command]
+fn soloist_key(key: String) -> std::result::Result<bool, String> {
+    crate::soloist::set_api_key(&key)
+        .map(|()| true)
+        .map_err(error)
+}
+#[tauri::command]
+fn soloist_has_key() -> bool {
+    crate::soloist::api_key().is_ok_and(|key| key.is_some())
 }
 #[tauri::command]
 fn configure_spicy_lyrics(
@@ -4806,6 +4967,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            soloist_key,
+            soloist_has_key,
             resume_after_restart,
             take_link,
             window_fullscreen,

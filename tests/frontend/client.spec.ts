@@ -14634,3 +14634,45 @@ test("panel scrollers keep only the overlay bar after switching pages", async ({
     ),
   ).toBe(0);
 });
+
+test("Soloist greys out playback settings it cannot honour", async ({
+  page,
+}) => {
+  await startClient(page);
+  await page.evaluate(() =>
+    (window as any).__clientTest.emit({
+      type: "soloist",
+      status: null,
+      keys_refused: true,
+    }),
+  );
+  await openSettings(page, "General");
+  const row = page.locator(".setting-row", { hasText: "Audio output" });
+  await expect(row).not.toHaveClass(/unavailable/);
+  await expect(page.locator(".soloist-refused")).toBeVisible();
+  await page.getByLabel("Play through Spotify Soloist").check();
+  await expect(row).toHaveClass(/unavailable/);
+  await expect(row.locator(".setting-unavailable")).toContainText(
+    "Spotify Soloist",
+  );
+  await page.evaluate(() =>
+    (window as any).__clientTest.emit({
+      type: "soloist",
+      status: { state: "needs_key" },
+      keys_refused: true,
+    }),
+  );
+  await expect(page.getByText("Add your Soloist API key")).toBeVisible();
+  await page.getByLabel("Soloist API key").fill("abc123");
+  await page.getByRole("button", { name: "Save key" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as any).__clientTest.commands.find(
+            (entry: any) => entry.command === "soloist_key",
+          )?.args.key,
+      ),
+    )
+    .toBe("abc123");
+});

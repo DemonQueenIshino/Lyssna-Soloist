@@ -21,7 +21,9 @@ use std::{
 pub const DEVICE_NAME: &str = "Lyssna Player";
 const DOWNLOAD_URL: &str =
     "https://soloist-builds.spotifycdn.com/soloist_release_windows_x86_64.zip";
+#[cfg(not(target_os = "macos"))]
 const KEY_TARGET: &str = "Lyssna/Soloist";
+#[cfg(not(target_os = "macos"))]
 const KEY_USER: &str = "api-key";
 const SIGNER: &str = "Spotify AB";
 const MAX_ARCHIVE: u64 = 128 * 1024 * 1024;
@@ -42,12 +44,19 @@ pub enum Status {
     Failed(String),
 }
 
+#[cfg(not(target_os = "macos"))]
 fn key_entry() -> Result<keyring::Entry> {
     Ok(keyring::Entry::new_with_target(
         KEY_TARGET, KEY_TARGET, KEY_USER,
     )?)
 }
 
+#[cfg(target_os = "macos")]
+pub fn api_key() -> Result<Option<String>> {
+    Ok(None)
+}
+
+#[cfg(not(target_os = "macos"))]
 pub fn api_key() -> Result<Option<String>> {
     match key_entry()?.get_password() {
         Ok(key) if !key.trim().is_empty() => Ok(Some(key.trim().to_owned())),
@@ -66,6 +75,9 @@ pub fn valid_key(key: &str) -> bool {
 pub fn set_api_key(key: &str) -> Result<()> {
     let key = key.trim();
     ensure!(valid_key(key), "That doesn't look like a Soloist API key");
+    #[cfg(target_os = "macos")]
+    bail!("Spotify Soloist is set up on Windows only");
+    #[cfg(not(target_os = "macos"))]
     key_entry()?
         .set_password(key)
         .context("Cannot save the Soloist key to the secure credential store")

@@ -1026,3 +1026,17 @@
 .nightly-dialog .inline-actions .outline {
   margin-right: auto;
 }
+.setting-row.unavailable .setting-label,
+.setting-row.unavailable .setting-help,
+.setting-row.unavailable .setting-control {
+  opacity: 0.45;
+}
+.setting-unavailable {
+  margin: 4px 0 0;
+  color: var(--muted, #b3b3b3);
+  font-size: 12px;
+}
+.soloist-refused {
+  color: var(--text, #fff);
+  font-weight: 600;
+}

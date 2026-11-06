@@ -309,6 +309,9 @@ pub struct Settings {
     /// songs: off by default, 1 to 12 seconds, 5 unless chosen.
     pub crossfade: bool,
     pub crossfade_seconds: u8,
+    /// Play through Spotify Soloist, Spotify's own player, for accounts
+    /// whose audio keys Spotify refuses to Lyssna's engine.
+    pub soloist: bool,
     /// Shuffle and repeat ("off", "context" or "track") as last chosen, so
     /// they carry over to other playlists and the next launch.
     pub shuffle: bool,
@@ -427,6 +430,7 @@ impl Default for Settings {
             cinema_lyrics: false,
             crossfade: false,
             crossfade_seconds: 5,
+            soloist: false,
             shuffle: false,
             repeat: "off".into(),
             lyrics_discord_usernames: true,

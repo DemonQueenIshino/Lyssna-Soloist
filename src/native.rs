@@ -130,6 +130,9 @@ pub enum NativeEvent {
     },
     Error(String),
     ControlError(String),
+    /// Spotify refused audio keys for two songs in a row, so it refuses the
+    /// account here; the player stopped.
+    KeysRefused,
 }
 
 #[derive(Clone)]
@@ -1006,7 +1009,7 @@ fn preload_selection(action: &PlayerAction) -> Option<(librespot_core::SpotifyUr
 /// How long a selection may take to start loading before Play gives up on it.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(20);
 // librespot #1649: refused keys follow the account, not the song.
-const KEYS_REFUSED: &str = "Spotify is refusing to unlock songs for this account on this computer, so they can't play here. Open the Spotify app on this computer or your phone, then choose it under Connect to a device to play through it.";
+pub(crate) const KEYS_REFUSED: &str = "Spotify is refusing to unlock songs for this account on this computer, so they can't play here. Open the Spotify app on this computer or your phone, then choose it under Connect to a device to play through it.";
 
 /// Transport commands for the local player diagnostics log.
 fn command_kind(action: &PlayerAction) -> Option<&'static str> {
@@ -2707,7 +2710,7 @@ async fn run(
                             diagnostic("Spotify refused audio keys for two songs in a row; stopped");
                             loaded.store(false, Ordering::Release);
                             intent.reset();
-                            emit(NativeEvent::ControlError(KEYS_REFUSED.into()));
+                            emit(NativeEvent::KeysRefused);
                         }
                     },
                     None => { diagnostic("audio connection ended: player events closed"); connection_lost = true; break; },

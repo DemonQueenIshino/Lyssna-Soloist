@@ -40,6 +40,7 @@ import { DEFAULT_MARKER, MARKER_COLOURS } from "./highlighter";
 import { LyricsProvider } from "./lyrics-provider";
 import { MusixmatchToken } from "./musixmatch-token";
 import { AnimatorPresetRow } from "./animator-settings";
+import { SOLOIST_PLAYS, SoloistRows } from "./soloist-settings";
 
 /** Default source order; LRCLIB and Netease start off. */
 const DEFAULT_SOURCES = [
@@ -215,6 +216,7 @@ export function SettingsWindow({
     };
   }, []);
   const settings = state.settings;
+  const soloistPlays = settings.soloist ? SOLOIST_PLAYS : undefined;
   const [audioOutputs, setAudioOutputs] = useState<string[] | null>(null);
   const [audioRefresh, setAudioRefresh] = useState(0);
   const [testingOutput, setTestingOutput] = useState(false);
@@ -311,8 +313,20 @@ export function SettingsWindow({
     scroll.current?.scrollTo({ top: 0 });
     writePlace(next, 0);
   };
-  const flag = (key: Flag, label: string, help: string, keywords = "") => (
-    <SettingRow key={key} label={label} help={help} keywords={keywords}>
+  const flag = (
+    key: Flag,
+    label: string,
+    help: string,
+    keywords = "",
+    unavailable?: string,
+  ) => (
+    <SettingRow
+      key={key}
+      label={label}
+      help={help}
+      keywords={keywords}
+      unavailable={unavailable}
+    >
       <Toggle
         label={label}
         checked={!!settings[key]}
@@ -428,11 +442,22 @@ export function SettingsWindow({
       "General",
       "Playback",
       [
+        <SoloistRows
+          key="soloist"
+          settings={settings}
+          status={state.soloist}
+          keysRefused={!!state.keys_refused}
+          onSettings={onSettings}
+          onCall={onCall}
+          onOpen={onOpen}
+          onNotice={onNotice}
+        />,
         <SettingRow
           key="output"
           label="Audio output"
           help="Speakers or headphones for this computer."
           keywords="device speaker headphones sound"
+          unavailable={soloistPlays}
         >
           <select
             className="settings-select"
@@ -462,6 +487,7 @@ export function SettingsWindow({
           "Crossfade songs",
           "Fade each song into the next when one runs into the other, as Spotify does. Songs you pick start straight away.",
           "crossfade fade transition gapless overlap blend",
+          soloistPlays,
         ),
         settings.crossfade ? (
           <SettingRow
@@ -469,6 +495,7 @@ export function SettingsWindow({
             label={`Crossfade length: ${settings.crossfade_seconds || 5} s`}
             help="How long the end of one song overlaps the start of the next."
             keywords="crossfade seconds length duration"
+            unavailable={soloistPlays}
           >
             <span className="settings-range">
               <input
@@ -494,6 +521,7 @@ export function SettingsWindow({
           label="New headphones or speakers"
           help="Find outputs you connected while Lyssna was open."
           keywords="audio output device refresh"
+          unavailable={soloistPlays}
         >
           <button
             className="pill outline"
@@ -507,6 +535,7 @@ export function SettingsWindow({
           label="Check output"
           help="Play two quiet tones on the selected output."
           keywords="audio output test sound"
+          unavailable={soloistPlays}
         >
           <button
             className="pill outline"
@@ -533,6 +562,7 @@ export function SettingsWindow({
             </span>
           }
           keywords="native audio reconnect playback engine"
+          unavailable={soloistPlays}
         >
           <button
             className="pill outline"

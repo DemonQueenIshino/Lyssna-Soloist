@@ -480,6 +480,12 @@ export function reducer(state: AppState, action: Action): AppState {
       };
     case "login_finished":
       return { ...state, login_pending: false, restoring_session: false };
+    case "soloist":
+      return {
+        ...state,
+        soloist: action.status ?? null,
+        keys_refused: action.keys_refused,
+      };
     case "native":
       return {
         ...state,
