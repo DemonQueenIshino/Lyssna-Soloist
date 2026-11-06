@@ -3907,9 +3907,11 @@ const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreen
 const PROFILE_WINDOW_SCRIPT: &str = r#"(() => {
   // The site's script sends any page that finds WebView2's
   // `chrome.webview` or `EmbeddedBrowserWebView` to its retired /embed
-  // page. The window uses no IPC.
+  // page; WebKit's `window.webkit` gives an app away the same way. The
+  // window uses no IPC.
   try {
     delete window.EmbeddedBrowserWebView;
+    delete window.webkit;
     const chrome = window.chrome;
     if (chrome && "webview" in chrome) {
       const visible = Object.create(Object.getPrototypeOf(chrome));
@@ -4075,7 +4077,57 @@ fn navigate_as_chrome(window: &tauri::WebviewWindow, url: tauri::Url, script: St
         let _ = fallback.navigate(url);
     }
 }
-#[cfg(not(windows))]
+/// Loads `url` with `script` as the page's only start-up script, the
+/// window presenting itself as the installed Safari. spicylyrics.org serves
+/// "Embeds have been retired" to pages carrying Tauri's globals.
+#[cfg(target_os = "macos")]
+fn navigate_as_chrome(window: &tauri::WebviewWindow, url: tauri::Url, script: String) {
+    let agent = safari_user_agent();
+    let _ = window.with_webview(move |webview| unsafe {
+        use objc2::MainThreadMarker;
+        use objc2_foundation::NSString;
+        use objc2_web_kit::{WKUserScript, WKUserScriptInjectionTime, WKWebView};
+        let Some(main) = MainThreadMarker::new() else {
+            return;
+        };
+        let view = &*webview.inner().cast::<WKWebView>();
+        let content = view.configuration().userContentController();
+        content.removeAllUserScripts();
+        content.removeAllScriptMessageHandlers();
+        let own = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+            main.alloc(),
+            &NSString::from_str(&script),
+            WKUserScriptInjectionTime::AtDocumentStart,
+            true,
+        );
+        content.addUserScript(&own);
+        view.setCustomUserAgent(Some(&NSString::from_str(&agent)));
+    });
+    let _ = window.navigate(url);
+}
+/// Safari's user agent for the installed Safari; WKWebView's own leaves out
+/// the version and Safari tokens.
+#[cfg(target_os = "macos")]
+fn safari_user_agent() -> String {
+    let version = std::process::Command::new("defaults")
+        .args([
+            "read",
+            "/Applications/Safari.app/Contents/Info",
+            "CFBundleShortVersionString",
+        ])
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|version| version.trim().to_owned())
+        .filter(|version| {
+            !version.is_empty() && version.chars().all(|c| c.is_ascii_digit() || c == '.')
+        })
+        .unwrap_or_else(|| "26.0".into());
+    format!(
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/{version} Safari/605.1.15"
+    )
+}
+#[cfg(not(any(windows, target_os = "macos")))]
 fn navigate_as_chrome(window: &tauri::WebviewWindow, url: tauri::Url, _script: String) {
     let _ = window.navigate(url);
 }
