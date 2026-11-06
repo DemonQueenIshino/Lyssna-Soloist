@@ -73,8 +73,20 @@ fn fetch() -> Result<Release> {
 /// The major version serving the largest share of users, and its most
 /// served build. A release still rolling out serves only a minority.
 fn most_served(body: &Value) -> Option<Release> {
+    // Shares add up within a fraction group, the users currently on that
+    // major version; the newest group is where most people are.
+    let group = |release: &Value| {
+        release["fractionGroup"]
+            .as_str()
+            .and_then(|group| group.parse::<u32>().ok())
+    };
+    let releases = body["releases"].as_array()?;
+    let newest = releases.iter().filter_map(group).max();
     let mut shares: HashMap<u32, (f64, f64, String)> = HashMap::new();
-    for release in body["releases"].as_array()? {
+    for release in releases
+        .iter()
+        .filter(|release| newest.is_none() || group(release) == newest)
+    {
         let version = release["version"].as_str()?;
         let major = version.split('.').next()?.parse::<u32>().ok()?;
         let fraction = release["fraction"].as_f64().unwrap_or(0.0);
@@ -226,5 +238,11 @@ mod tests {
             })
         );
         assert_eq!(most_served(&json!({"releases": []})), None);
+        let grouped = json!({"releases": [
+            {"version": "156.0.8078.80", "fraction": 0.495, "fractionGroup": "156"},
+            {"version": "157.0.8103.38", "fraction": 0.2475, "fractionGroup": "156"},
+            {"version": "157.0.8103.39", "fraction": 1, "fractionGroup": "155"},
+        ]});
+        assert_eq!(most_served(&grouped).unwrap().version, "156.0.8078.80");
     }
 }
