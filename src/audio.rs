@@ -1,11 +1,12 @@
 //! Small, bounded audio queue. Seek acknowledgements discard previously decoded samples.
+use crate::audio_output::OutputStream;
 use librespot_playback::{
     audio_backend::{Sink, SinkError, SinkResult},
     convert::Converter,
     decoder::AudioPacket,
     mixer::{Mixer, NoOpVolume, VolumeGetter},
 };
-use rodio::{OutputStream, Source};
+use rodio::Source;
 use std::{
     sync::{
         Arc, Mutex,

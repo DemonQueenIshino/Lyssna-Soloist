@@ -30,6 +30,8 @@ pub mod lyric_sources;
 pub mod lyrics;
 #[cfg(target_os = "macos")]
 pub mod mac_bundle;
+#[cfg(target_os = "macos")]
+mod macos_audio;
 #[cfg(feature = "desktop")]
 pub mod media;
 pub mod model;
