@@ -913,6 +913,11 @@ impl Desktop {
                                 }
                                 _ => continue,
                             };
+                            let soloist_id =
+                                pump.soloist_device.lock().ok().and_then(|id| id.clone());
+                            if soloist_id.is_some() && playback.device.id == soloist_id {
+                                playback.device.name = crate::soloist::DEVICE_NAME.into();
+                            }
                             if snapshot.native_ready
                                 && playback.device.name == native::device_name()
                             {
@@ -2356,8 +2361,15 @@ fn player(
             lock(&state.0.native_id)?.as_deref(),
             &snapshot.playback.device,
         );
-        // With Soloist on, Soloist is this computer's player.
-        let soloist = local && snapshot.settings.soloist && request.command != "dj";
+        // With Soloist on, Soloist is this computer's player. Spotify can
+        // show Soloist active, under another name, while Soloist itself
+        // still reports idle; the Web API refuses it either way.
+        let soloist_id = lock(&state.0.soloist_device)?.clone();
+        let on_soloist = snapshot.settings.soloist
+            && soloist_id.is_some()
+            && (target.as_deref() == soloist_id.as_deref()
+                || snapshot.playback.device.id == soloist_id);
+        let soloist = (local || on_soloist) && snapshot.settings.soloist && request.command != "dj";
         let resume_from = snapshot.playback.item.as_ref().map(|track| {
             (
                 track.uri.clone(),
@@ -2366,7 +2378,7 @@ fn player(
         });
         if soloist
             && lock(&state.0.soloist_link)?.as_ref().is_some_and(|link| {
-                if link.active() && link.loaded() {
+                if link.active() && link.loaded() || on_soloist && link.live() {
                     link.send(&action)
                 } else if matches!(action, PlayerAction::Play(None))
                     && let Some((uri, position)) = resume_from.as_ref()
