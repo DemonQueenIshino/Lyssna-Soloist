@@ -47,6 +47,8 @@ mod reconnect;
 pub mod rename;
 pub mod resume;
 pub mod search;
+#[cfg(not(target_os = "macos"))]
+pub mod soloist;
 pub mod spotify;
 pub mod track_facts;
 #[cfg(feature = "legacy-ui")]
