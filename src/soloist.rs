@@ -734,14 +734,12 @@ mod tests {
 
     #[test]
     fn merge_prefs_sets_normalization_off() {
-        let sample = "audio.play_bitrate_non_metered_migrated=true\naudio.crossfade_migrated_to_ps=true\n";
+        let sample =
+            "audio.play_bitrate_non_metered_migrated=true\naudio.crossfade_migrated_to_ps=true\n";
         let merged = merge_prefs(sample);
         assert!(merged.contains("audio.normalize_v2=false\n"));
         assert!(merged.contains("audio.crossfade_migrated_to_ps=true\n"));
-        assert_eq!(
-            merged.matches("audio.normalize_v2=false").count(),
-            1
-        );
+        assert_eq!(merged.matches("audio.normalize_v2=false").count(), 1);
     }
 
     #[test]
@@ -770,21 +768,28 @@ mod tests {
 
     #[test]
     fn write_normalization_updates_account_prefs() {
-        let dir = tempfile::tempdir().unwrap();
-        let user_prefs = dir.path().join("settings").join("Users").join("test_user").join("prefs");
+        let root = std::env::temp_dir().join(format!("lyssna-prefs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.as_path();
+        let user_prefs = dir
+            .join("settings")
+            .join("Users")
+            .join("test_user")
+            .join("prefs");
         fs::create_dir_all(user_prefs.parent().unwrap()).unwrap();
         fs::write(&user_prefs, "audio.normalize_v2=true\n").unwrap();
 
-        assert_eq!(write_normalization(dir.path()).unwrap(), 1);
-        assert_eq!(write_normalization(dir.path()).unwrap(), 0);
+        assert_eq!(write_normalization(dir).unwrap(), 1);
+        assert_eq!(write_normalization(dir).unwrap(), 0);
 
         let content = fs::read_to_string(&user_prefs).unwrap();
         assert!(content.contains("audio.normalize_v2=false\n"));
 
-        let users = user_dirs(dir.path());
+        let users = user_dirs(dir);
         assert_eq!(users, ["test_user".to_string()].into());
-        mark_seeded(dir.path(), &users).unwrap();
-        assert_eq!(seeded(dir.path()), users);
+        mark_seeded(dir, &users).unwrap();
+        assert_eq!(seeded(dir), users);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[cfg(windows)]
