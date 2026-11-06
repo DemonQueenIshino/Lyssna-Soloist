@@ -91,6 +91,8 @@ impl PlaybackIntent {
 pub(crate) struct UnavailableWatch {
     current: Option<String>,
     pending: Option<Instant>,
+    /// Refused songs in a row when this last reported.
+    refused: usize,
 }
 impl UnavailableWatch {
     const GRACE: Duration = Duration::from_secs(5);
@@ -105,11 +107,23 @@ impl UnavailableWatch {
     pub fn playing(&mut self, uri: &str) {
         self.current = Some(uri.to_owned());
         self.pending = None;
+        self.refused = 0;
     }
     pub fn unavailable(&mut self, uri: &str, now: Instant) {
         if self.current.as_deref() == Some(uri) && self.pending.is_none() {
             self.pending = Some(now);
         }
+    }
+    /// True once per stop when the current song failed after Spotify
+    /// refused keys for `refused` songs in a row: the account is blocked,
+    /// not the songs, and the player has stopped.
+    pub fn key_refused(&mut self, uri: &str, refused: usize) -> bool {
+        if refused < 2 || self.current.as_deref() != Some(uri) || self.refused == refused {
+            return false;
+        }
+        self.refused = refused;
+        self.pending = None;
+        true
     }
     /// True once, when the current track stayed unplayable for the grace period.
     pub fn due(&mut self, now: Instant) -> bool {
@@ -144,6 +158,20 @@ mod unavailable_tests {
         watch.track("next");
         watch.playing("next");
         assert!(!watch.due(now + Duration::from_secs(10)));
+    }
+    #[test]
+    fn refused_keys_report_once_per_stop() {
+        let mut watch = UnavailableWatch::default();
+        watch.track("first");
+        watch.unavailable("first", Instant::now());
+        assert!(!watch.key_refused("first", 1));
+        watch.track("second");
+        watch.unavailable("second", Instant::now());
+        assert!(!watch.key_refused("next", 2));
+        assert!(watch.key_refused("second", 2));
+        assert!(!watch.key_refused("second", 2));
+        assert!(!watch.due(Instant::now() + Duration::from_secs(10)));
+        assert!(watch.key_refused("second", 3));
     }
     #[test]
     fn a_stuck_current_track_reports_once_after_the_grace_period() {

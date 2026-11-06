@@ -109,6 +109,17 @@ struct PlayerInternal {
 
 static PLAYER_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+// Lyssna: Spotify refuses audio keys for some accounts (librespot #1649).
+// Every song then fails, so the client needs to tell that apart from one
+// unavailable song.
+static REFUSED_KEYS: AtomicUsize = AtomicUsize::new(0);
+static REFUSED_TRACKS: AtomicUsize = AtomicUsize::new(0);
+
+/// Songs in a row that failed because Spotify refused their audio key.
+pub fn refused_tracks() -> usize {
+    REFUSED_TRACKS.load(Ordering::Relaxed)
+}
+
 enum PlayerCommand {
     Load {
         track_id: SpotifyUri,
@@ -1118,7 +1129,11 @@ impl PlayerTrackLoader {
             }
             warn!("<{track_uri}> failed to load, trying once more");
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            self.load_bare_track(track_uri, position_ms).await.ok_or(())
+            let loaded = self.load_bare_track(track_uri, position_ms).await;
+            if loaded.is_none() && REFUSED_KEYS.load(Ordering::Relaxed) > 0 {
+                REFUSED_TRACKS.fetch_add(1, Ordering::Relaxed);
+            }
+            loaded.ok_or(())
         };
         let speech = async {
             if !self.config.passthrough
@@ -1292,8 +1307,15 @@ impl PlayerTrackLoader {
             // without decryption. If the file was encrypted after all, the decoder will fail
             // parsing and bail out, so we should be safe from outputting ear-piercing noise.
             let key = match key {
-                Ok(key) => Some(key),
+                Ok(key) => {
+                    REFUSED_KEYS.store(0, Ordering::Relaxed);
+                    REFUSED_TRACKS.store(0, Ordering::Relaxed);
+                    Some(key)
+                }
                 Err(e) => {
+                    if e.kind == crate::core::error::ErrorKind::Unavailable {
+                        REFUSED_KEYS.fetch_add(1, Ordering::Relaxed);
+                    }
                     warn!("Unable to load key, continuing without decryption: {e}");
                     None
                 }

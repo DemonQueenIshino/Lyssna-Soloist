@@ -1005,6 +1005,8 @@ fn preload_selection(action: &PlayerAction) -> Option<(librespot_core::SpotifyUr
 
 /// How long a selection may take to start loading before Play gives up on it.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(20);
+// librespot #1649: refused keys follow the account, not the song.
+const KEYS_REFUSED: &str = "Spotify is refusing to unlock songs for this account, so nothing can play. This is a Spotify-side block that affects some accounts in apps outside the official one. Try again later, or sign in with another account.";
 
 /// Transport commands for the local player diagnostics log.
 fn command_kind(action: &PlayerAction) -> Option<&'static str> {
@@ -2698,7 +2700,16 @@ async fn run(
                     Some(PlayerEvent::PositionChanged { track_id, position_ms, .. } | PlayerEvent::PositionCorrection { track_id, position_ms, .. }) => {if pending_seek.is_none(){emit(NativeEvent::Position { uri: track_id.to_uri(), position_ms: u64::from(position_ms).saturating_sub(audio_buffer.latency_ms()), playing: None, seeked: false });}},
                     // Spotify skips unplayable tracks itself and also reports failed
                     // preloads; only a current track that stays stuck is an error.
-                    Some(PlayerEvent::Unavailable { track_id, .. }) => unavailable.unavailable(&track_id.to_uri(), std::time::Instant::now()),
+                    Some(PlayerEvent::Unavailable { track_id, .. }) => {
+                        let uri = track_id.to_uri();
+                        unavailable.unavailable(&uri, std::time::Instant::now());
+                        if unavailable.key_refused(&uri, librespot_playback::player::refused_tracks()) {
+                            diagnostic("Spotify refused audio keys for two songs in a row; stopped");
+                            loaded.store(false, Ordering::Release);
+                            intent.reset();
+                            emit(NativeEvent::ControlError(KEYS_REFUSED.into()));
+                        }
+                    },
                     None => { diagnostic("audio connection ended: player events closed"); connection_lost = true; break; },
                     _ => {}
                 }
