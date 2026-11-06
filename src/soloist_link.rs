@@ -39,7 +39,7 @@ pub struct Link {
 }
 
 impl Link {
-    pub fn start(data: PathBuf, on_state: impl Fn(State) + Send + 'static) -> Self {
+    pub fn start(data: PathBuf, mut on_state: impl FnMut(State) + Send + 'static) -> Self {
         let (commands, receive) = mpsc::channel();
         let live = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
@@ -50,7 +50,7 @@ impl Link {
                 while !thread_stop.load(Ordering::Acquire) {
                     if let Ok(mut socket) = open(&data) {
                         thread_live.store(true, Ordering::Release);
-                        run(&mut socket, &receive, &thread_stop, &on_state);
+                        run(&mut socket, &receive, &thread_stop, &mut on_state);
                         thread_live.store(false, Ordering::Release);
                         on_state(State::default());
                     }
@@ -102,7 +102,7 @@ fn run(
     socket: &mut WebSocket<TcpStream>,
     commands: &mpsc::Receiver<Value>,
     stop: &AtomicBool,
-    on_state: &impl Fn(State),
+    on_state: &mut impl FnMut(State),
 ) {
     while !stop.load(Ordering::Acquire) {
         while let Ok(command) = commands.try_recv() {

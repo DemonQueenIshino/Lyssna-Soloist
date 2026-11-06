@@ -183,8 +183,23 @@ fn set_soloist(inner: &Inner, wanted: bool) {
         *slot = Some(crate::soloist::Supervisor::start());
         if let (Ok(data), Ok(mut link)) = (crate::soloist::data_dir(), inner.soloist_link.lock()) {
             let (events, playing) = (inner.events_in.clone(), inner.soloist_playing.clone());
-            *link = Some(crate::soloist_link::Link::start(data, move |state| {
+            let controls = inner.controls.clone();
+            let mut known: Option<crate::model::Track> = None;
+            *link = Some(crate::soloist_link::Link::start(data, move |mut state| {
                 playing.store(state.active, Ordering::Release);
+                // Soloist's first report of a song can lack its artists and
+                // length, and it does not send a fuller one later.
+                if let Some(track) = state.track.as_mut() {
+                    match known.as_ref().filter(|known| known.uri == track.uri) {
+                        Some(full) => *track = full.clone(),
+                        None => {
+                            if let Ok(full) = controls.track(&track.uri) {
+                                *track = full.clone();
+                                known = Some(full);
+                            }
+                        }
+                    }
+                }
                 let _ = events.send(Event::SoloistPlayback(Box::new(soloist_playback(state))));
             }));
         }
