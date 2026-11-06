@@ -102,6 +102,11 @@ impl Link {
             .all(|command| self.commands.send(command).is_ok())
     }
 
+    /// Makes Soloist the account's active device.
+    pub fn activate(&self) -> bool {
+        self.live() && self.commands.send(command("activate", json!({}))).is_ok()
+    }
+
     /// Sends the action straight to Soloist; false when it needs Connect.
     pub fn send(&self, action: &PlayerAction) -> bool {
         let commands = commands(action);

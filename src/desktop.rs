@@ -241,6 +241,22 @@ fn soloist_playback(state: crate::soloist_link::State) -> crate::model::Playback
     }
 }
 
+/// Soloist's device ID while Soloist plays for this computer.
+fn soloist_in_use(inner: &Inner) -> Option<String> {
+    let on = inner
+        .snapshot
+        .lock()
+        .is_ok_and(|snapshot| snapshot.settings.soloist);
+    let live = inner
+        .soloist_link
+        .lock()
+        .is_ok_and(|link| link.as_ref().is_some_and(|link| link.live()));
+    if !(on && live) {
+        return None;
+    }
+    inner.soloist_device.lock().ok().and_then(|id| id.clone())
+}
+
 fn soloist_active(inner: &Inner) -> bool {
     inner
         .soloist_link
@@ -3104,10 +3120,37 @@ async fn jam(
             "leave" => controls.follow_jam(false),
             _ => {}
         }
+        // With Soloist on, Soloist is this computer's player, so it hosts.
+        let soloist = soloist_in_use(&inner);
         // Spotify ties a new Jam to the host's active device. Started while
         // Lyssna isn't the one playing, the Jam would follow another
         // device and songs changed here would never reach the guests.
-        if action == "start" {
+        if action == "start"
+            && let Some(id) = soloist.as_deref()
+        {
+            let active = controls.devices().ok().and_then(|devices| {
+                devices
+                    .into_iter()
+                    .find(|device| device.is_active)
+                    .and_then(|device| device.id)
+            });
+            if active.as_deref() != Some(id) {
+                let resume = inner.snapshot.lock().ok().and_then(|snapshot| {
+                    let track = snapshot.playback.item.as_ref()?;
+                    Some((
+                        track.uri.clone(),
+                        snapshot.playback.progress_ms.unwrap_or(0),
+                    ))
+                });
+                let moved = lock(&inner.soloist_link).is_ok_and(|link| {
+                    link.as_ref().is_some_and(|link| match resume.as_ref() {
+                        Some((uri, position)) => link.play_from(uri, *position),
+                        None => link.activate(),
+                    })
+                });
+                crate::native::diagnostic(&format!("jam start: playback moved to Soloist={moved}"));
+            }
+        } else if action == "start" {
             let local = controls
                 .session()
                 .map(|session| session.device_id().to_owned());
@@ -3123,14 +3166,27 @@ async fn jam(
             }
         }
         let result = controls.run(async |session| match action.as_str() {
-            "current" => crate::jam::current(session).await,
+            "current" => crate::jam::current(session, soloist.as_deref()).await,
             "join" => crate::jam::join(session, join.as_deref().unwrap_or_default())
                 .await
                 .map(Some),
-            "start" => crate::jam::start(session).await.map(Some),
-            "end" => crate::jam::end(session, id.as_deref().unwrap_or_default())
+            "start" => crate::jam::start(session, soloist.as_deref())
                 .await
-                .map(|()| None),
+                .map(Some),
+            "end" => {
+                crate::jam::end(session, id.as_deref().unwrap_or_default()).await?;
+                let after = crate::jam::current(session, soloist.as_deref()).await;
+                crate::native::diagnostic(&format!(
+                    "jam end: still in a Jam={:?} same={:?}",
+                    after.as_ref().map(Option::is_some),
+                    after
+                        .as_ref()
+                        .ok()
+                        .and_then(Option::as_ref)
+                        .map(|jam| Some(jam.session_id.as_str()) == id.as_deref())
+                ));
+                Ok(None)
+            }
             "leave" => crate::jam::leave(session, id.as_deref().unwrap_or_default())
                 .await
                 .map(|()| None),
@@ -3150,7 +3206,7 @@ async fn jam(
             ("current", Ok(None)) | ("end", Ok(_)) => Some(None),
             _ => None,
         };
-        if let Some(session_id) = hosted {
+        if let Some(session_id) = hosted.filter(|id| id.is_none() || soloist.is_none()) {
             let hosting = session_id.is_some();
             let sent = controls.send(PlayerAction::HostJam(session_id)).is_ok();
             if action != "current" {

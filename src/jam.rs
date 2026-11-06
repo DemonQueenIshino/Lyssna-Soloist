@@ -266,9 +266,9 @@ async fn request(
     }
 }
 
-/// The Jam this computer is in, if any.
-pub async fn current(session: &Session) -> Result<Option<Jam>> {
-    let device = token(session.device_id()).context("Invalid device ID")?;
+/// The Jam `device` (this computer's player by default) is in, if any.
+pub async fn current(session: &Session, device: Option<&str>) -> Result<Option<Jam>> {
+    let device = token(device.unwrap_or(session.device_id())).context("Invalid device ID")?;
     Ok(
         match call(
             session,
@@ -287,10 +287,10 @@ pub async fn current(session: &Session) -> Result<Option<Jam>> {
     )
 }
 
-pub async fn start(session: &Session) -> Result<Jam> {
-    let device = token(session.device_id()).context("Invalid device ID")?;
-    // Naming this computer makes it the Jam's host device, as joining does
-    // for guests, so what plays here is what the guests hear.
+pub async fn start(session: &Session, device: Option<&str>) -> Result<Jam> {
+    let device = token(device.unwrap_or(session.device_id())).context("Invalid device ID")?;
+    // Naming the player makes it the Jam's host device, as joining does
+    // for guests, so what plays there is what the guests hear.
     let started = call(
         session,
         Method::GET,
