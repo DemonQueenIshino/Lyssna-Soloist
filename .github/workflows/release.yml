@@ -56,7 +56,5 @@ jobs:
           $releaseNotes = $env:RELEASE_NOTES
           if (-not $releaseNotes) { $releaseNotes = "Lyssna $releaseVersion" }
           [System.IO.File]::WriteAllText('release-notes.txt', $releaseNotes)
-          # The tool uploads the build as releases/<version>/windows-x86_64/spotiflex.exe,
-          # the object name installed copies accept, whatever the local file is called.
           & '.\target\release\lyssna-release.exe' publish $releaseVersion '.\target\release\lyssna.exe' 'release-notes.txt'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

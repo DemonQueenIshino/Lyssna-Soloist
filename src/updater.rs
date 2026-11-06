@@ -22,6 +22,13 @@ use crate::config::data_dir;
 
 pub const BASE_URL: &str = "https://updates.clypdat.xyz";
 pub const TARGET: &str = "windows-x86_64";
+pub const CHANNEL: &str = "channels/stable/lyssna-windows-x86_64.json";
+/// Copies from before the rename read this channel and only accept `spotiflex.exe`.
+pub const LEGACY_CHANNEL: &str = "channels/stable/windows-x86_64.json";
+
+pub fn artifact(version: &str, executable: &str) -> String {
+    format!("releases/{version}/{TARGET}/{executable}")
+}
 pub const SUPPORTED: bool = cfg!(all(target_os = "windows", target_arch = "x86_64"));
 pub const UNSUPPORTED_MESSAGE: &str =
     "Automatic updates are unavailable on this platform. Install new builds manually.";
@@ -139,9 +146,7 @@ fn verify(envelope: &[u8], key: &VerifyingKey) -> Result<Manifest> {
         "Update targets a different platform"
     );
     ensure!(
-        // Releases keep SpotiFlex's file name: copies from before the rename
-        // only accept that one.
-        manifest.artifact == format!("releases/{}/{TARGET}/spotiflex.exe", manifest.version),
+        manifest.artifact == artifact(&manifest.version, "lyssna.exe"),
         "Invalid update artifact path"
     );
     ensure!(
@@ -178,7 +183,7 @@ pub fn set_channel(channel: &str) {
 
 fn check(client: &reqwest::blocking::Client) -> Result<Option<Update>> {
     let response = client
-        .get(format!("{BASE_URL}/channels/stable/{TARGET}.json"))
+        .get(format!("{BASE_URL}/{CHANNEL}"))
         .timeout(Duration::from_secs(15))
         .send()
         .map_err(|_| anyhow::anyhow!("Cannot reach update service"))?;
@@ -515,7 +520,7 @@ mod tests {
         Manifest {
             version: "0.2.0".into(),
             target: TARGET.into(),
-            artifact: format!("releases/0.2.0/{TARGET}/spotiflex.exe"),
+            artifact: artifact("0.2.0", "lyssna.exe"),
             sha256: "a".repeat(64),
             size: 10,
             notes: "Release notes".into(),
@@ -532,6 +537,9 @@ mod tests {
         assert!(verify(&serde_json::to_vec(&envelope).unwrap(), &key).is_err());
         let mut bad = manifest();
         bad.artifact = "https://elsewhere.example.com/app.exe".into();
+        let (bytes, key) = signed(&bad);
+        assert!(verify(&bytes, &key).is_err());
+        bad.artifact = artifact("0.2.0", "spotiflex.exe");
         let (bytes, key) = signed(&bad);
         assert!(verify(&bytes, &key).is_err());
     }

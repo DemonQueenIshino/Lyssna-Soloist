@@ -10,7 +10,9 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signer, SigningKey};
-use lyssna::updater::{BASE_URL, Envelope, Manifest, TARGET, file_hash};
+use lyssna::updater::{
+    BASE_URL, CHANNEL, Envelope, LEGACY_CHANNEL, Manifest, TARGET, artifact, file_hash,
+};
 
 fn secret(name: &str) -> Result<String> {
     if let Ok(value) = std::env::var(format!(
@@ -103,46 +105,65 @@ fn upload(client: &reqwest::blocking::Client, path: &str, file: &Path, token: &s
     Ok(())
 }
 
+fn signed_channel(key: &SigningKey, manifest: &Manifest, path: &Path) -> Result<()> {
+    let payload = serde_json::to_vec(manifest)?;
+    let envelope = Envelope {
+        signature: STANDARD.encode(key.sign(&payload).to_bytes()),
+        payload: STANDARD.encode(payload),
+    };
+    fs::write(path, serde_json::to_vec_pretty(&envelope)?)?;
+    Ok(())
+}
+
 fn publish(arguments: &[String], upload_files: bool) -> Result<()> {
+    let bridge = arguments.iter().any(|argument| argument == "--bridge");
+    let arguments: Vec<_> = arguments
+        .iter()
+        .filter(|argument| *argument != "--bridge")
+        .collect();
     ensure!(
         arguments.len() == 3,
-        "Usage: lyssna-release prepare|publish VERSION EXE NOTES_FILE"
+        "Usage: lyssna-release prepare|publish VERSION EXE NOTES_FILE [--bridge]"
     );
-    let version = semver::Version::parse(&arguments[0])?;
+    let version = semver::Version::parse(arguments[0])?;
     ensure!(
         version.pre.is_empty() && version.build.is_empty(),
         "Stable versions must use MAJOR.MINOR.PATCH"
     );
     ensure!(
-        arguments[0] == env!("CARGO_PKG_VERSION"),
+        *arguments[0] == env!("CARGO_PKG_VERSION"),
         "Release version must match Cargo.toml"
     );
-    let executable = Path::new(&arguments[1]);
-    let notes = fs::read_to_string(&arguments[2])?;
+    let executable = Path::new(arguments[1]);
+    let notes = fs::read_to_string(arguments[2])?;
     ensure!(notes.len() <= 16_384, "Release notes exceed limit");
     let directory = Path::new("dist").join(format!("{version}"));
     fs::create_dir_all(&directory)?;
     let manifest = Manifest {
         version: version.to_string(),
         target: TARGET.into(),
-        // SpotiFlex's file name, which copies from before the rename require.
-        artifact: format!("releases/{version}/{TARGET}/spotiflex.exe"),
+        artifact: artifact(&version.to_string(), "lyssna.exe"),
         sha256: file_hash(executable)?,
         size: fs::metadata(executable)?.len(),
         notes,
+    };
+    // Copies from before the rename only accept spotiflex.exe from the old
+    // channel; bridging lets them update into a copy that reads the new one.
+    let legacy = Manifest {
+        artifact: artifact(&version.to_string(), "spotiflex.exe"),
+        ..manifest.clone()
     };
     let key = signing_key()?;
     ensure!(
         STANDARD.encode(key.verifying_key().to_bytes()) == lyssna::updater::PUBLIC_KEY.trim(),
         "Release signing key does not match the compiled public key; rebuild first"
     );
-    let payload = serde_json::to_vec(&manifest)?;
-    let envelope = Envelope {
-        signature: STANDARD.encode(key.sign(&payload).to_bytes()),
-        payload: STANDARD.encode(payload),
-    };
-    let channel = directory.join("windows-x86_64.json");
-    fs::write(&channel, serde_json::to_vec_pretty(&envelope)?)?;
+    let channel = directory.join("lyssna-windows-x86_64.json");
+    signed_channel(&key, &manifest, &channel)?;
+    let legacy_channel = directory.join("windows-x86_64.json");
+    if bridge {
+        signed_channel(&key, &legacy, &legacy_channel)?;
+    }
     let source = directory.join("source.zip");
     ensure!(
         Command::new("git")
@@ -162,16 +183,17 @@ fn publish(arguments: &[String], upload_files: bool) -> Result<()> {
         upload(&client, &manifest.artifact, executable, &token)?;
         upload(
             &client,
-            &format!("releases/{version}/{TARGET}/source.zip"),
+            &artifact(&version.to_string(), "source.zip"),
             &source,
             &token,
         )?;
-        upload(
-            &client,
-            &format!("channels/stable/{TARGET}.json"),
-            &channel,
-            &token,
-        )?;
+        if bridge {
+            upload(&client, &legacy.artifact, executable, &token)?;
+        }
+        upload(&client, CHANNEL, &channel, &token)?;
+        if bridge {
+            upload(&client, LEGACY_CHANNEL, &legacy_channel, &token)?;
+        }
         println!("Published signed version {version} to R2.");
     } else {
         println!(
