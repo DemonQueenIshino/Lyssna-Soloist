@@ -1476,14 +1476,17 @@ impl SpircTask {
                 return Ok(());
             }
             PlayerEvent::Unavailable { track_id, .. } => {
-                self.handle_unavailable(&track_id)?;
-                if self.connect_state.current_track(|t| &t.uri) == &track_id.to_uri() {
-                    // Lyssna: once Spotify refuses keys for two songs in a row
-                    // it refuses every song, so skipping on would only run
-                    // through the whole list in silence.
-                    if crate::playback::player::refused_tracks() >= 2 {
+                // Lyssna: once Spotify refuses keys for two songs in a row it
+                // refuses every song, so skipping on or preloading the next one
+                // would only ask for more keys in silence.
+                if crate::playback::player::refused_tracks() >= 2 {
+                    self.connect_state.mark_unavailable(&track_id)?;
+                    if self.connect_state.current_track(|t| &t.uri) == &track_id.to_uri() {
                         self.player.stop();
-                    } else {
+                    }
+                } else {
+                    self.handle_unavailable(&track_id)?;
+                    if self.connect_state.current_track(|t| &t.uri) == &track_id.to_uri() {
                         self.handle_next(None, false)?
                     }
                 }

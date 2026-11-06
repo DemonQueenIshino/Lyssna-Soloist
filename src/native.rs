@@ -1006,7 +1006,7 @@ fn preload_selection(action: &PlayerAction) -> Option<(librespot_core::SpotifyUr
 /// How long a selection may take to start loading before Play gives up on it.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(20);
 // librespot #1649: refused keys follow the account, not the song.
-const KEYS_REFUSED: &str = "Spotify is refusing to unlock songs for this account, so nothing can play. This is a Spotify-side block that affects some accounts in apps outside the official one. Try again later, or sign in with another account.";
+const KEYS_REFUSED: &str = "Spotify is refusing to unlock songs for this account on this computer, so they can't play here. Open the Spotify app on this computer or your phone, then choose it under Connect to a device to play through it.";
 
 /// Transport commands for the local player diagnostics log.
 fn command_kind(action: &PlayerAction) -> Option<&'static str> {
