@@ -1939,7 +1939,9 @@ function FullscreenVolume({
   side: "left" | "right" | "below";
 }) {
   const device = state.playback.device;
-  const [volume, setVolume] = useState(device.volume_percent ?? 100);
+  const [volume, setVolume] = useState(
+    device.volume_percent ?? state.settings.volume_percent ?? 100,
+  );
   const send = useRef(onPlayer);
   send.current = onPlayer;
   const control = useMemo(
@@ -1952,8 +1954,19 @@ function FullscreenVolume({
   );
   useEffect(() => () => control.dispose(), [control]);
   useEffect(() => {
-    control.observe(device.volume_percent, device.id ?? device.name);
-  }, [device.volume_percent, device.id, device.name, control]);
+    control.observe(
+      device.volume_percent ??
+        (state.settings.soloist ? state.settings.volume_percent : undefined),
+      device.id ?? device.name,
+    );
+  }, [
+    device.volume_percent,
+    device.id,
+    device.name,
+    state.settings.soloist,
+    state.settings.volume_percent,
+    control,
+  ]);
   // The level a tap on the speaker brings back after muting.
   const audible = useRef(volume || 50);
   if (volume) audible.current = volume;

@@ -705,6 +705,16 @@ export function reducer(state: AppState, action: Action): AppState {
         ...state,
         clock_revision: state.clock_revision + (action.loading ? 1 : 0),
         playback: action.playback,
+        settings:
+          action.playback.device.volume_percent != null &&
+          (action.playback.device.name === state.local_device_name ||
+            (state.settings.soloist &&
+              action.playback.device.name === "Lyssna Player"))
+            ? {
+                ...state.settings,
+                volume_percent: action.playback.device.volume_percent,
+              }
+            : state.settings,
         observed_at: action.observed_at,
         pending:
           action.loading && action.playback.item

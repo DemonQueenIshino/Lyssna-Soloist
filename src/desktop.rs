@@ -961,6 +961,12 @@ impl Desktop {
                                 playback.device.volume_percent =
                                     Some(snapshot.settings.volume_percent);
                             }
+                            if snapshot.settings.soloist
+                                && playback.device.name == crate::soloist::DEVICE_NAME
+                            {
+                                playback.device.volume_percent =
+                                    Some(snapshot.settings.volume_percent);
+                            }
                             if snapshot.playback.keep_native_when_empty(
                                 &playback,
                                 snapshot.native_ready,
@@ -1681,7 +1687,10 @@ impl Desktop {
         self.0.dj_voice.cancel_all();
         if let Ok(mut snapshot) = self.0.snapshot.lock() {
             // A remote speaker's level is not this computer's volume.
-            if snapshot.playback.device.name == native::device_name() {
+            if snapshot.playback.device.name == native::device_name()
+                || (snapshot.settings.soloist
+                    && snapshot.playback.device.name == crate::soloist::DEVICE_NAME)
+            {
                 snapshot.settings.volume_percent = snapshot
                     .playback
                     .device
@@ -2429,6 +2438,19 @@ fn player(
                 }
             })
         {
+            if let PlayerAction::Volume(volume) = action {
+                snapshot.settings.volume_percent = volume;
+                snapshot.playback.device.volume_percent = Some(volume);
+                let _ = app.emit(
+                    "lyssna",
+                    json!({
+                        "type": "playback",
+                        "playback": snapshot.playback,
+                        "observed_at": snapshot.observed_at,
+                        "changed": false,
+                    }),
+                );
+            }
             if matches!(action, PlayerAction::Enqueue(_)) {
                 let _ = app.emit(
                     "lyssna",
@@ -2745,6 +2767,19 @@ fn player(
         } else {
             target
         };
+        if soloist && let PlayerAction::Volume(volume) = action {
+            snapshot.settings.volume_percent = volume;
+            snapshot.playback.device.volume_percent = Some(volume);
+            let _ = app.emit(
+                "lyssna",
+                json!({
+                    "type": "playback",
+                    "playback": snapshot.playback,
+                    "observed_at": snapshot.observed_at,
+                    "changed": false,
+                }),
+            );
+        }
         state.0.commands.send(Command::Player { action, device })?;
         Ok(())
     };
