@@ -6,6 +6,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeSet,
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -432,6 +433,74 @@ fn spawn(exe: &Path, data: &Path, cache: &Path, key: &str) -> Result<Child> {
     Ok(child)
 }
 
+const NORMALIZE: &str = "audio.normalize_v2";
+const SEEDED_MARKER: &str = ".soloist-prefs-seeded";
+
+/// Updates `existing` prefs with volume normalization turned off, preserving every other key.
+pub fn merge_prefs(existing: &str) -> String {
+    let wanted = [(NORMALIZE, "false")];
+    let mut lines: Vec<String> = existing
+        .split('\n')
+        .map(|line| line.trim_end_matches('\r'))
+        .filter(|line| !line.is_empty())
+        .filter(|line| {
+            let key = line.split('=').next().unwrap_or_default();
+            !wanted.iter().any(|(wanted, _)| *wanted == key)
+        })
+        .map(str::to_string)
+        .collect();
+    lines.extend(wanted.iter().map(|(key, value)| format!("{key}={value}")));
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
+}
+
+fn users_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("settings").join("Users")
+}
+
+pub fn user_dirs(data_dir: &Path) -> BTreeSet<String> {
+    let Ok(entries) = fs::read_dir(users_dir(data_dir)) else {
+        return BTreeSet::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().join("prefs").is_file())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect()
+}
+
+pub fn write_normalization(data_dir: &Path) -> std::io::Result<usize> {
+    let mut written = 0;
+    for user in user_dirs(data_dir) {
+        let path = users_dir(data_dir).join(user).join("prefs");
+        let existing = fs::read_to_string(&path)?;
+        let merged = merge_prefs(&existing);
+        if merged != existing {
+            fs::write(&path, merged.as_bytes())?;
+            written += 1;
+        }
+    }
+    Ok(written)
+}
+
+pub fn seeded(data_dir: &Path) -> BTreeSet<String> {
+    fs::read_to_string(data_dir.join(SEEDED_MARKER))
+        .map(|text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn mark_seeded(data_dir: &Path, users: &BTreeSet<String>) -> std::io::Result<()> {
+    let text: String = users.iter().map(|user| format!("{user}\n")).collect();
+    fs::write(data_dir.join(SEEDED_MARKER), text)
+}
+
 fn supervise(status: &Mutex<Status>, stop: &AtomicBool) {
     let Ok(root) = root() else {
         set(
@@ -486,6 +555,16 @@ fn supervise(status: &Mutex<Status>, stop: &AtomicBool) {
             }
         }
         let _ = fs::create_dir_all(&data);
+        match write_normalization(&data) {
+            Ok(count) if count > 0 => {
+                log::info!("Soloist: turned off volume normalization in {count} account prefs")
+            }
+            Ok(_) => {}
+            Err(error) => log::warn!("Soloist: could not write normalization prefs: {error}"),
+        }
+        let users_before = user_dirs(&data);
+        let _ = mark_seeded(&data, &users_before);
+
         set(status, Status::Starting);
         let mut child = match spawn(&exe, &data, &cache, &key) {
             Ok(child) => child,
@@ -501,6 +580,7 @@ fn supervise(status: &Mutex<Status>, stop: &AtomicBool) {
             job.assign(&child);
         }
         let started = Instant::now();
+        let mut seed_restart = false;
         let code = loop {
             if stop.load(Ordering::Acquire) {
                 let _ = child.kill();
@@ -514,6 +594,19 @@ fn supervise(status: &Mutex<Status>, stop: &AtomicBool) {
                 Ok(true) => {
                     failures = 0;
                     set(status, Status::Ready);
+                    let present = user_dirs(&data);
+                    let seeded_users = seeded(&data);
+                    if present.difference(&seeded_users).next().is_some() {
+                        let _ = write_normalization(&data);
+                        let _ = mark_seeded(&data, &present);
+                        log::info!(
+                            "Soloist: new login detected; restarting Soloist once to disable normalization"
+                        );
+                        seed_restart = true;
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break None;
+                    }
                 }
                 Ok(false) => set(status, Status::NeedsPairing),
                 Err(_) => {}
@@ -531,6 +624,9 @@ fn supervise(status: &Mutex<Status>, stop: &AtomicBool) {
                 return;
             }
         };
+        if seed_restart {
+            continue;
+        }
         if code == Some(EXPIRED) {
             log::info!("Soloist build expired; fetching the current one");
             checked = None;
@@ -634,6 +730,61 @@ mod tests {
         assert_eq!(read_release(&dir).etag, "\"b\"");
         swap_in(&dir).unwrap();
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn merge_prefs_sets_normalization_off() {
+        let sample = "audio.play_bitrate_non_metered_migrated=true\naudio.crossfade_migrated_to_ps=true\n";
+        let merged = merge_prefs(sample);
+        assert!(merged.contains("audio.normalize_v2=false\n"));
+        assert!(merged.contains("audio.crossfade_migrated_to_ps=true\n"));
+        assert_eq!(
+            merged.matches("audio.normalize_v2=false").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn merge_prefs_replaces_existing_normalization_flag() {
+        let sample = "audio.normalize_v2=true\naudio.gapless=true\n";
+        let merged = merge_prefs(sample);
+        assert!(!merged.contains("audio.normalize_v2=true"));
+        assert!(merged.contains("audio.normalize_v2=false\n"));
+        assert!(merged.contains("audio.gapless=true\n"));
+    }
+
+    #[test]
+    fn merge_prefs_is_idempotent() {
+        let sample = "audio.play_bitrate_non_metered_migrated=true\n";
+        let once = merge_prefs(sample);
+        assert_eq!(merge_prefs(&once), once);
+    }
+
+    #[test]
+    fn merge_prefs_handles_crlf() {
+        let sample = "a=1\r\nb=2\r\n";
+        let merged = merge_prefs(sample);
+        assert!(!merged.contains('\r'));
+        assert!(merged.contains("audio.normalize_v2=false\n"));
+    }
+
+    #[test]
+    fn write_normalization_updates_account_prefs() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_prefs = dir.path().join("settings").join("Users").join("test_user").join("prefs");
+        fs::create_dir_all(user_prefs.parent().unwrap()).unwrap();
+        fs::write(&user_prefs, "audio.normalize_v2=true\n").unwrap();
+
+        assert_eq!(write_normalization(dir.path()).unwrap(), 1);
+        assert_eq!(write_normalization(dir.path()).unwrap(), 0);
+
+        let content = fs::read_to_string(&user_prefs).unwrap();
+        assert!(content.contains("audio.normalize_v2=false\n"));
+
+        let users = user_dirs(dir.path());
+        assert_eq!(users, ["test_user".to_string()].into());
+        mark_seeded(dir.path(), &users).unwrap();
+        assert_eq!(seeded(dir.path()), users);
     }
 
     #[cfg(windows)]

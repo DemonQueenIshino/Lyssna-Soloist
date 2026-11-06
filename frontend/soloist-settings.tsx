@@ -75,7 +75,7 @@ export function SoloistRows({
               player. Turn this on to play through Spotify Soloist instead.
             </span>
           ) : (
-            "Spotify's official background player plays your music, for accounts Spotify won't unlock in Lyssna's own player. Needs Spotify Premium and a free Soloist API key. Soloist always evens out loudness between songs; Spotify gives no way to turn that off."
+            "Spotify's official background player plays your music, for accounts Spotify won't unlock in Lyssna's own player. Needs Spotify Premium and a free Soloist API key."
           )
         }
         keywords="soloist spotify player refused audio key connect"
