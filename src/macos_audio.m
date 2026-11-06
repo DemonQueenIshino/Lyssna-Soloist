@@ -162,7 +162,7 @@ bool lyssna_audio_enqueue(void *handle, const float *samples, size_t frames) {
         }
         CMBlockBufferRef block = NULL;
         OSStatus status = CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, NULL, frames * 8,
-            kCFAllocatorDefault, NULL, 0, frames * 8, 0, &block);
+            kCFAllocatorDefault, NULL, 0, frames * 8, kCMBlockBufferAssureMemoryNowFlag, &block);
         if (status != noErr) return false;
         status = CMBlockBufferReplaceDataBytes(samples, block, 0, frames * 8);
         CMSampleBufferRef buffer = NULL;
