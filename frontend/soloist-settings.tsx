@@ -4,6 +4,7 @@ import { SettingRow, Toggle } from "./setting-row";
 import type { Settings, SoloistStatus } from "./types";
 
 const DASHBOARD = "https://developer.spotify.com/dashboard/soloist";
+export const SOLOIST_DEVICE = "Lyssna Player";
 
 export const SOLOIST_PLAYS =
   "Unavailable while Spotify Soloist plays your music: Soloist uses the system default output and its own playback settings.";
@@ -21,7 +22,7 @@ export function soloistMessage(status: SoloistStatus | null | undefined) {
     case "starting":
       return "Starting Spotify Soloist…";
     case "needs_pairing":
-      return "One last step: on your phone, open the Spotify app on the same Wi-Fi, tap the devices icon and pick “Lyssna Player”. You only do this once.";
+      return `One last step: on your phone, open the Spotify app on the same Wi-Fi, tap the devices icon and pick “${SOLOIST_DEVICE}”. You only do this once.`;
     case "ready":
       return "Ready. Songs play through Spotify Soloist.";
     case "failed":

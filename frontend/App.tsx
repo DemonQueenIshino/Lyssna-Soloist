@@ -224,6 +224,7 @@ import {
   saveRecentSearches,
   type RecentSearch,
 } from "./recent-searches";
+import { SOLOIST_DEVICE } from "./soloist-settings";
 import type { SearchEntry } from "./search-results";
 /** Lyrics use Inter unless the user picks a lyrics font. */
 /** Inputs that take no typing, so Space still toggles playback. */
@@ -5763,7 +5764,8 @@ function PlayerBar({
   const elsewhere =
     !!state.playback.device.name &&
     state.playback.device.is_active &&
-    state.playback.device.name !== state.local_device_name;
+    state.playback.device.name !== state.local_device_name &&
+    !(state.settings.soloist && state.playback.device.name === SOLOIST_DEVICE);
   useEffect(() => {
     volumeControl.observe(
       state.playback.device.volume_percent,

@@ -9604,6 +9604,13 @@ test("a green bar names the other device playing and opens the device list", asy
   // This computer playing shows no bar.
   await playOn("Lyssna (test)");
   await expect(bar).toHaveCount(0);
+  // Soloist plays for this computer, so it shows no bar while it is on.
+  await playOn("Lyssna Player");
+  await expect(bar).toHaveText("Playing on Lyssna Player");
+  await page.keyboard.press("Escape");
+  await openSettings(page, "General");
+  await page.getByLabel("Play through Spotify Soloist").check();
+  await expect(bar).toHaveCount(0);
 });
 
 test("volume bar turns Spotify green with a knob on hover", async ({
