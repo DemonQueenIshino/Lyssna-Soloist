@@ -1,0 +1,38 @@
+name: Build Test Windows Binary
+
+on:
+  push:
+    branches:
+      - "test/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build lyssna.exe
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.0
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install 1.98.0 --profile minimal
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-release
+      - run: npm ci
+      - run: npm run build
+      - name: Build lyssna (release)
+        run: cargo build --release --locked --bin lyssna
+      - name: Upload lyssna.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: lyssna-windows-exe
+          path: target/release/lyssna.exe
