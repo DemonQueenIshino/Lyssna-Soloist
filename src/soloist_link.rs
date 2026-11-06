@@ -35,6 +35,10 @@ pub struct State {
 pub struct Link {
     commands: mpsc::Sender<Value>,
     live: Arc<AtomicBool>,
+    /// Soloist is the account's active device.
+    active: Arc<AtomicBool>,
+    /// Soloist has a song loaded that Play can resume.
+    loaded: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
 }
 
@@ -42,16 +46,23 @@ impl Link {
     pub fn start(data: PathBuf, mut on_state: impl FnMut(State) + Send + 'static) -> Self {
         let (commands, receive) = mpsc::channel();
         let live = Arc::new(AtomicBool::new(false));
+        let active = Arc::new(AtomicBool::new(false));
+        let loaded = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
         let (thread_live, thread_stop) = (live.clone(), stop.clone());
+        let flags = Flags {
+            active: active.clone(),
+            loaded: loaded.clone(),
+        };
         let _ = thread::Builder::new()
             .name("soloist-link".into())
             .spawn(move || {
                 while !thread_stop.load(Ordering::Acquire) {
                     if let Ok(mut socket) = open(&data) {
                         thread_live.store(true, Ordering::Release);
-                        run(&mut socket, &receive, &thread_stop, &mut on_state);
+                        run(&mut socket, &receive, &thread_stop, &flags, &mut on_state);
                         thread_live.store(false, Ordering::Release);
+                        flags.set(false, false);
                         on_state(State::default());
                     }
                     thread::sleep(Duration::from_secs(1));
@@ -60,12 +71,35 @@ impl Link {
         Self {
             commands,
             live,
+            active,
+            loaded,
             stop,
         }
     }
 
     pub fn live(&self) -> bool {
         self.live.load(Ordering::Acquire)
+    }
+
+    pub fn active(&self) -> bool {
+        self.live() && self.active.load(Ordering::Acquire)
+    }
+
+    pub fn loaded(&self) -> bool {
+        self.loaded.load(Ordering::Acquire)
+    }
+
+    /// Starts a song in Soloist at a position, for when it has none loaded.
+    pub fn play_from(&self, uri: &str, position_ms: u64) -> bool {
+        if !self.live() || !uri.starts_with("spotify:track:") {
+            return false;
+        }
+        let mut sent = vec![command("play", json!({"uri": uri}))];
+        if position_ms > 0 {
+            sent.push(command("seek", json!({"position_ms": position_ms})));
+        }
+        sent.into_iter()
+            .all(|command| self.commands.send(command).is_ok())
     }
 
     /// Sends the action straight to Soloist; false when it needs Connect.
@@ -77,6 +111,18 @@ impl Link {
         commands
             .into_iter()
             .all(|command| self.commands.send(command).is_ok())
+    }
+}
+
+struct Flags {
+    active: Arc<AtomicBool>,
+    loaded: Arc<AtomicBool>,
+}
+
+impl Flags {
+    fn set(&self, active: bool, loaded: bool) {
+        self.active.store(active, Ordering::Release);
+        self.loaded.store(loaded, Ordering::Release);
     }
 }
 
@@ -102,6 +148,7 @@ fn run(
     socket: &mut WebSocket<TcpStream>,
     commands: &mpsc::Receiver<Value>,
     stop: &AtomicBool,
+    flags: &Flags,
     on_state: &mut impl FnMut(State),
 ) {
     while !stop.load(Ordering::Acquire) {
@@ -117,13 +164,18 @@ fn run(
                 };
                 match message["type"].as_str() {
                     Some("auth_state") => {
-                        if !message["is_active"].as_bool().unwrap_or(false) {
+                        let active = message["is_active"].as_bool().unwrap_or(false);
+                        flags.active.store(active, Ordering::Release);
+                        if !active {
+                            flags.loaded.store(false, Ordering::Release);
                             on_state(State::default());
                         }
                     }
                     Some("playback_state") => {
                         if let Ok(playback) = serde_json::from_value::<Playback>(message) {
-                            on_state(playback.state());
+                            let state = playback.state();
+                            flags.set(state.active, state.track.is_some());
+                            on_state(state);
                         }
                     }
                     _ => {}

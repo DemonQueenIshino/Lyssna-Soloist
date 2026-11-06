@@ -117,8 +117,6 @@ struct Inner {
     /// Move playback to Soloist as soon as it is ready.
     soloist_takeover: AtomicBool,
     soloist_link: Mutex<Option<crate::soloist_link::Link>>,
-    /// Soloist is the active device and reports its playback itself.
-    soloist_playing: Arc<AtomicBool>,
     events_in: mpsc::Sender<Event>,
 }
 pub struct Desktop(Arc<Inner>);
@@ -182,11 +180,10 @@ fn set_soloist(inner: &Inner, wanted: bool) {
     if wanted && slot.is_none() {
         *slot = Some(crate::soloist::Supervisor::start());
         if let (Ok(data), Ok(mut link)) = (crate::soloist::data_dir(), inner.soloist_link.lock()) {
-            let (events, playing) = (inner.events_in.clone(), inner.soloist_playing.clone());
+            let events = inner.events_in.clone();
             let controls = inner.controls.clone();
             let mut known: Option<crate::model::Track> = None;
             *link = Some(crate::soloist_link::Link::start(data, move |mut state| {
-                playing.store(state.active, Ordering::Release);
                 // Soloist's first report of a song can lack its artists and
                 // length, and it does not send a fuller one later.
                 if let Some(track) = state.track.as_mut() {
@@ -209,7 +206,6 @@ fn set_soloist(inner: &Inner, wanted: bool) {
         if let Ok(mut link) = inner.soloist_link.lock() {
             *link = None;
         }
-        inner.soloist_playing.store(false, Ordering::Release);
         if let Ok(mut device) = inner.soloist_device.lock() {
             *device = None;
         }
@@ -243,6 +239,13 @@ fn soloist_playback(state: crate::soloist_link::State) -> crate::model::Playback
         },
         context: state.context,
     }
+}
+
+fn soloist_active(inner: &Inner) -> bool {
+    inner
+        .soloist_link
+        .lock()
+        .is_ok_and(|link| link.as_ref().is_some_and(|link| link.active()))
 }
 
 /// Reports Soloist's state, learns its device ID and moves playback to it
@@ -541,7 +544,6 @@ impl Desktop {
             soloist_device: Mutex::new(None),
             soloist_takeover: AtomicBool::new(false),
             soloist_link: Mutex::new(None),
-            soloist_playing: Arc::new(AtomicBool::new(false)),
             events_in: worker.events_in.clone(),
         });
         sync_soloist(&inner);
@@ -901,11 +903,7 @@ impl Desktop {
                             let mut playback = match event {
                                 // Soloist's own reports are current; polled
                                 // ones lag behind it.
-                                Event::Playback(playback, _)
-                                    if !pump.soloist_playing.load(Ordering::Acquire) =>
-                                {
-                                    playback
-                                }
+                                Event::Playback(playback, _) if !soloist_active(&pump) => playback,
                                 Event::SoloistPlayback(mut playback)
                                     if playback.device.is_active =>
                                 {
@@ -2360,11 +2358,26 @@ fn player(
         );
         // With Soloist on, Soloist is this computer's player.
         let soloist = local && snapshot.settings.soloist && request.command != "dj";
+        let resume_from = snapshot.playback.item.as_ref().map(|track| {
+            (
+                track.uri.clone(),
+                snapshot.playback.progress_ms.unwrap_or(0),
+            )
+        });
         if soloist
-            && state.0.soloist_playing.load(Ordering::Acquire)
-            && lock(&state.0.soloist_link)?
-                .as_ref()
-                .is_some_and(|link| link.send(&action))
+            && lock(&state.0.soloist_link)?.as_ref().is_some_and(|link| {
+                if link.active() && link.loaded() {
+                    link.send(&action)
+                } else if matches!(action, PlayerAction::Play(None))
+                    && let Some((uri, position)) = resume_from.as_ref()
+                {
+                    // An idle Soloist has nothing to resume; Spotify refuses
+                    // a bare Play with "Permission denied".
+                    link.play_from(uri, *position)
+                } else {
+                    false
+                }
+            })
         {
             if matches!(action, PlayerAction::Enqueue(_)) {
                 let _ = app.emit(
