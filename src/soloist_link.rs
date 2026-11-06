@@ -107,6 +107,11 @@ impl Link {
         self.live() && self.commands.send(command("activate", json!({}))).is_ok()
     }
 
+    /// Gives up Soloist's place as the account's active device.
+    pub fn deactivate(&self) -> bool {
+        self.live() && self.commands.send(command("deactivate", json!({}))).is_ok()
+    }
+
     /// Sends the action straight to Soloist; false when it needs Connect.
     pub fn send(&self, action: &PlayerAction) -> bool {
         let commands = commands(action);

@@ -3165,6 +3165,20 @@ async fn jam(
                 crate::native::diagnostic(&format!("jam start: playback moved here={moved}"));
             }
         }
+        let resume = soloist.as_ref().filter(|_| action == "end").and_then(|_| {
+            let snapshot = inner.snapshot.lock().ok()?;
+            let track = snapshot.playback.item.as_ref()?;
+            Some((
+                track.uri.clone(),
+                snapshot.playback.progress_ms.unwrap_or(0),
+                snapshot.playback.is_playing,
+            ))
+        });
+        if soloist.is_some() && action == "end" {
+            let left = lock(&inner.soloist_link)
+                .is_ok_and(|link| link.as_ref().is_some_and(|link| link.deactivate()));
+            crate::native::diagnostic(&format!("jam end: Soloist gave up playing={left}"));
+        }
         let result = controls.run(async |session| match action.as_str() {
             "current" => crate::jam::current(session, soloist.as_deref()).await,
             "join" => crate::jam::join(session, join.as_deref().unwrap_or_default())
@@ -3174,17 +3188,31 @@ async fn jam(
                 .await
                 .map(Some),
             "end" => {
-                crate::jam::end(session, id.as_deref().unwrap_or_default()).await?;
-                let after = crate::jam::current(session, soloist.as_deref()).await;
-                crate::native::diagnostic(&format!(
-                    "jam end: still in a Jam={:?} same={:?}",
-                    after.as_ref().map(Option::is_some),
-                    after
-                        .as_ref()
-                        .ok()
-                        .and_then(Option::as_ref)
-                        .map(|jam| Some(jam.session_id.as_str()) == id.as_deref())
-                ));
+                let mut ending = id.clone().unwrap_or_default();
+                for attempt in 1..=3 {
+                    crate::jam::end(session, &ending).await?;
+                    if soloist.is_none() {
+                        break;
+                    }
+                    // Soloist starts a new Jam of its own moments after
+                    // its Jam ends while it is still the active device.
+                    tokio::time::sleep(Duration::from_millis(800)).await;
+                    match crate::jam::current(session, soloist.as_deref()).await {
+                        Ok(Some(jam)) if jam.session_id != ending && jam.is_owner => {
+                            crate::native::diagnostic(&format!(
+                                "jam end: Soloist started another Jam, ending it too ({attempt})"
+                            ));
+                            ending = jam.session_id;
+                        }
+                        after => {
+                            crate::native::diagnostic(&format!(
+                                "jam end: still in a Jam={:?}",
+                                after.as_ref().map(Option::is_some)
+                            ));
+                            break;
+                        }
+                    }
+                }
                 Ok(None)
             }
             "leave" => crate::jam::leave(session, id.as_deref().unwrap_or_default())
@@ -3193,6 +3221,13 @@ async fn jam(
             "control" => crate::jam::let_others_control(session, allowed.unwrap_or(true)).await,
             _ => anyhow::bail!("Unknown Jam action"),
         });
+        if let Some((uri, position, true)) = resume.as_ref() {
+            let resumed = lock(&inner.soloist_link).is_ok_and(|link| {
+                link.as_ref()
+                    .is_some_and(|link| link.play_from(uri, *position))
+            });
+            crate::native::diagnostic(&format!("jam end: Soloist resumed={resumed}"));
+        }
         // Still in the Jam if leaving failed.
         if action == "leave" && result.is_err() {
             controls.follow_jam(true);
