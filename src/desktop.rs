@@ -183,22 +183,31 @@ fn set_soloist(inner: &Inner, wanted: bool) {
             let events = inner.events_in.clone();
             let controls = inner.controls.clone();
             let mut known: Option<crate::model::Track> = None;
-            *link = Some(crate::soloist_link::Link::start(data, move |mut state| {
-                // Soloist's first report of a song can lack its artists and
-                // length, and it does not send a fuller one later.
-                if let Some(track) = state.track.as_mut() {
-                    match known.as_ref().filter(|known| known.uri == track.uri) {
-                        Some(full) => *track = full.clone(),
-                        None => {
-                            if let Ok(full) = controls.track(&track.uri) {
-                                *track = full.clone();
-                                known = Some(full);
+            *link = Some(crate::soloist_link::Link::start(
+                data,
+                move |mut state| {
+                    // Soloist's first report of a song can lack its artists and
+                    // length, and it does not send a fuller one later.
+                    if let Some(track) = state.track.as_mut() {
+                        match known.as_ref().filter(|known| known.uri == track.uri) {
+                            Some(full) => *track = full.clone(),
+                            None => {
+                                if let Ok(full) = controls.track(&track.uri) {
+                                    *track = full.clone();
+                                    known = Some(full);
+                                }
                             }
                         }
                     }
-                }
-                let _ = events.send(Event::SoloistPlayback(Box::new(soloist_playback(state))));
-            }));
+                    let _ = events.send(Event::SoloistPlayback(Box::new(soloist_playback(state))));
+                },
+                {
+                    let events = inner.events_in.clone();
+                    move || {
+                        let _ = events.send(Event::SoloistQueueChanged);
+                    }
+                },
+            ));
         }
     } else if !wanted && let Some(supervisor) = slot.take() {
         drop(slot);
@@ -907,6 +916,18 @@ impl Desktop {
                             emit(
                                 json!({"type":"native","ready":false,"status":snapshot.native_status}),
                             );
+                        }
+                        Event::SoloistQueueChanged => {
+                            if let Some(track) = snapshot.playback.item.clone() {
+                                let _ = pump.commands.send(Command::PlayingDetails(track));
+                            }
+                            if snapshot.route == "queue" {
+                                let _ = pump.commands.send(Command::Tracks {
+                                    key: "queue".into(),
+                                    offset: 0,
+                                    generation: snapshot.generation,
+                                });
+                            }
                         }
                         Event::Library(playlists) => {
                             snapshot.playlists = playlists;
@@ -2400,8 +2421,9 @@ fn player(
                     && let Some((uri, position)) = resume_from.as_ref()
                 {
                     // An idle Soloist has nothing to resume; Spotify refuses
-                    // a bare Play with "Permission denied".
-                    link.play_from(uri, *position)
+                    // a bare Play with "Permission denied". It takes over the
+                    // account's last playback first, queue and all.
+                    link.resume(uri, *position)
                 } else {
                     false
                 }

@@ -9,12 +9,12 @@ use std::{
     net::TcpStream,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tungstenite::{Message, WebSocket};
 
@@ -32,6 +32,20 @@ pub struct State {
     pub volume: Option<u8>,
 }
 
+/// Soloist's upcoming songs and how many of them were queued by hand,
+/// while Soloist is the active device.
+static QUEUE: Mutex<Option<(Vec<Track>, usize)>> = Mutex::new(None);
+
+pub fn queue() -> Option<(Vec<Track>, usize)> {
+    QUEUE.lock().ok().and_then(|queue| queue.clone())
+}
+
+fn set_queue(queue: Option<(Vec<Track>, usize)>) {
+    if let Ok(mut current) = QUEUE.lock() {
+        *current = queue;
+    }
+}
+
 pub struct Link {
     commands: mpsc::Sender<Value>,
     live: Arc<AtomicBool>,
@@ -43,7 +57,11 @@ pub struct Link {
 }
 
 impl Link {
-    pub fn start(data: PathBuf, mut on_state: impl FnMut(State) + Send + 'static) -> Self {
+    pub fn start(
+        data: PathBuf,
+        mut on_state: impl FnMut(State) + Send + 'static,
+        mut on_queue: impl FnMut() + Send + 'static,
+    ) -> Self {
         let (commands, receive) = mpsc::channel();
         let live = Arc::new(AtomicBool::new(false));
         let active = Arc::new(AtomicBool::new(false));
@@ -60,10 +78,19 @@ impl Link {
                 while !thread_stop.load(Ordering::Acquire) {
                     if let Ok(mut socket) = open(&data) {
                         thread_live.store(true, Ordering::Release);
-                        run(&mut socket, &receive, &thread_stop, &flags, &mut on_state);
+                        run(
+                            &mut socket,
+                            &receive,
+                            &thread_stop,
+                            &flags,
+                            &mut on_state,
+                            &mut on_queue,
+                        );
                         thread_live.store(false, Ordering::Release);
                         flags.set(false, false);
+                        set_queue(None);
                         on_state(State::default());
+                        on_queue();
                     }
                     thread::sleep(Duration::from_secs(1));
                 }
@@ -105,6 +132,42 @@ impl Link {
     /// Makes Soloist the account's active device.
     pub fn activate(&self) -> bool {
         self.live() && self.commands.send(command("activate", json!({}))).is_ok()
+    }
+
+    /// Picks up where the account last stopped, as Spotify's own apps do
+    /// when they become the active device; plays `uri` from `position_ms`
+    /// when Spotify has nothing to hand over.
+    pub fn resume(&self, uri: &str, position_ms: u64) -> bool {
+        if !self.activate() {
+            return false;
+        }
+        let (commands, live, active, loaded) = (
+            self.commands.clone(),
+            self.live.clone(),
+            self.active.clone(),
+            self.loaded.clone(),
+        );
+        let uri = uri.to_owned();
+        thread::spawn(move || {
+            let waited = Instant::now();
+            while waited.elapsed() < Duration::from_millis(2500) {
+                if live.load(Ordering::Acquire)
+                    && active.load(Ordering::Acquire)
+                    && loaded.load(Ordering::Acquire)
+                {
+                    let _ = commands.send(command("play", json!({})));
+                    return;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            if uri.starts_with("spotify:track:") {
+                let _ = commands.send(command("play", json!({"uri": uri})));
+                if position_ms > 0 {
+                    let _ = commands.send(command("seek", json!({"position_ms": position_ms})));
+                }
+            }
+        });
+        true
     }
 
     /// Gives up Soloist's place as the account's active device.
@@ -160,7 +223,13 @@ fn run(
     stop: &AtomicBool,
     flags: &Flags,
     on_state: &mut impl FnMut(State),
+    on_queue: &mut impl FnMut(),
 ) {
+    let ask_queue = command("get_queue", json!({"limit": QUEUE_LENGTH}));
+    if socket.send(Message::text(ask_queue.to_string())).is_err() {
+        return;
+    }
+    let mut playing: Option<String> = None;
     while !stop.load(Ordering::Acquire) {
         while let Ok(command) = commands.try_recv() {
             if socket.send(Message::text(command.to_string())).is_err() {
@@ -178,14 +247,34 @@ fn run(
                         flags.active.store(active, Ordering::Release);
                         if !active {
                             flags.loaded.store(false, Ordering::Release);
+                            set_queue(None);
                             on_state(State::default());
+                            on_queue();
                         }
                     }
                     Some("playback_state") => {
                         if let Ok(playback) = serde_json::from_value::<Playback>(message) {
                             let state = playback.state();
                             flags.set(state.active, state.track.is_some());
+                            let uri = state.track.as_ref().map(|track| track.uri.clone());
+                            if uri != playing {
+                                playing = uri;
+                                if socket.send(Message::text(ask_queue.to_string())).is_err() {
+                                    return;
+                                }
+                            }
                             on_state(state);
+                        }
+                    }
+                    Some("queue_changed") => {
+                        if let Ok(reply) = serde_json::from_value::<QueueReply>(message) {
+                            set_queue(
+                                flags
+                                    .active
+                                    .load(Ordering::Acquire)
+                                    .then(|| reply.upcoming()),
+                            );
+                            on_queue();
                         }
                     }
                     _ => {}
@@ -202,6 +291,37 @@ fn run(
         }
     }
     let _ = socket.close(None);
+}
+
+const QUEUE_LENGTH: usize = 50;
+
+#[derive(Deserialize)]
+struct QueueReply {
+    #[serde(default)]
+    upcoming: Vec<QueueEntry>,
+}
+
+#[derive(Deserialize)]
+struct QueueEntry {
+    #[serde(default)]
+    source: String,
+    item: Option<Item>,
+}
+
+impl QueueReply {
+    fn upcoming(self) -> (Vec<Track>, usize) {
+        let queued = self
+            .upcoming
+            .iter()
+            .take_while(|entry| entry.source == "queue")
+            .count();
+        let tracks = self
+            .upcoming
+            .into_iter()
+            .filter_map(|entry| entry.item.and_then(track))
+            .collect();
+        (tracks, queued)
+    }
 }
 
 fn command(name: &str, fields: Value) -> Value {
@@ -344,71 +464,77 @@ fn size(cover: &Cover) -> Option<u32> {
     }
 }
 
+fn track(item: Item) -> Option<Track> {
+    if !item.uri.starts_with("spotify:track:") {
+        return None;
+    }
+    let mut covers = item.decorations.visual_identity.cover;
+    if let Some(parent) = item.parent.as_ref() {
+        covers.extend(
+            parent
+                .entity
+                .decorations
+                .visual_identity
+                .cover
+                .iter()
+                .map(|cover| Cover {
+                    url: cover.url.clone(),
+                    size: cover.size.clone(),
+                }),
+        );
+    }
+    let mut images = Vec::new();
+    for cover in &covers {
+        let width = size(cover);
+        if width == Some(640) && images.iter().any(|image: &Artwork| image.width == width) {
+            continue;
+        }
+        if !images.iter().any(|image: &Artwork| image.url == cover.url) {
+            images.push(Artwork {
+                url: cover.url.clone(),
+                width,
+            });
+        }
+    }
+    images.sort_by_key(|image| std::cmp::Reverse(image.width));
+    let artists: Vec<Artist> = item
+        .creators
+        .iter()
+        .map(|creator| Artist {
+            id: id(&creator.entity.uri),
+            uri: creator.entity.uri.clone(),
+            name: creator.entity.decorations.identity.name.clone(),
+            ..Default::default()
+        })
+        .collect();
+    let album = item
+        .parent
+        .map(|parent| Album {
+            id: id(&parent.entity.uri),
+            uri: parent.entity.uri,
+            name: parent.entity.decorations.identity.name,
+            images: images.clone(),
+            artists: artists.clone(),
+            ..Default::default()
+        })
+        .unwrap_or_else(|| Album {
+            images,
+            ..Default::default()
+        });
+    Some(Track {
+        id: id(&item.uri),
+        uri: item.uri,
+        name: item.decorations.identity.name,
+        artists,
+        album,
+        duration_ms: item.playback.map_or(0, |playback| playback.duration_ms),
+        ..Default::default()
+    })
+}
+
 impl Playback {
     fn state(self) -> State {
-        let track = self
-            .item
-            .filter(|item| item.uri.starts_with("spotify:track:"))
-            .map(|item| {
-                let mut covers = item.decorations.visual_identity.cover;
-                if let Some(parent) = item.parent.as_ref() {
-                    covers.extend(parent.entity.decorations.visual_identity.cover.iter().map(
-                        |cover| Cover {
-                            url: cover.url.clone(),
-                            size: cover.size.clone(),
-                        },
-                    ));
-                }
-                let mut images = Vec::new();
-                for cover in &covers {
-                    let width = size(cover);
-                    if width == Some(640)
-                        && images.iter().any(|image: &Artwork| image.width == width)
-                    {
-                        continue;
-                    }
-                    if !images.iter().any(|image: &Artwork| image.url == cover.url) {
-                        images.push(Artwork {
-                            url: cover.url.clone(),
-                            width,
-                        });
-                    }
-                }
-                images.sort_by_key(|image| std::cmp::Reverse(image.width));
-                let artists: Vec<Artist> = item
-                    .creators
-                    .iter()
-                    .map(|creator| Artist {
-                        id: id(&creator.entity.uri),
-                        uri: creator.entity.uri.clone(),
-                        name: creator.entity.decorations.identity.name.clone(),
-                        ..Default::default()
-                    })
-                    .collect();
-                let album = item
-                    .parent
-                    .map(|parent| Album {
-                        id: id(&parent.entity.uri),
-                        uri: parent.entity.uri,
-                        name: parent.entity.decorations.identity.name,
-                        images: images.clone(),
-                        artists: artists.clone(),
-                        ..Default::default()
-                    })
-                    .unwrap_or_else(|| Album {
-                        images,
-                        ..Default::default()
-                    });
-                Track {
-                    id: id(&item.uri),
-                    uri: item.uri,
-                    name: item.decorations.identity.name,
-                    artists,
-                    album,
-                    duration_ms: item.playback.map_or(0, |playback| playback.duration_ms),
-                    ..Default::default()
-                }
-            });
+        let track = self.item.and_then(track);
         State {
             active: self.is_active,
             playing: self.status == "playing",
@@ -433,6 +559,36 @@ impl Playback {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queue_reply_keeps_upcoming_songs_and_counts_queued_ones() {
+        let entry = |source: &str, id: &str| {
+            json!({"uid": id, "source": source, "item": {
+                "uri": format!("spotify:track:{id}"),
+                "entity_type": "track",
+                "decorations": {"identity": {"name": id}},
+                "creators": [{"entity": {"uri": "spotify:artist:a", "decorations": {"identity": {"name": "Rihanna"}}}}],
+                "playback": {"duration_ms": 243000}
+            }})
+        };
+        let reply: QueueReply = serde_json::from_value(json!({
+            "type": "queue_changed",
+            "previous": [entry("context", "old")],
+            "upcoming": [entry("queue", "picked"), entry("context", "next"), {"source": "context", "item": {"uri": "spotify:episode:x"}}],
+        }))
+        .unwrap();
+        let (tracks, queued) = reply.upcoming();
+        assert_eq!(queued, 1);
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|track| track.name.as_str())
+                .collect::<Vec<_>>(),
+            ["picked", "next"]
+        );
+        assert_eq!(tracks[1].artists[0].name, "Rihanna");
+        assert_eq!(tracks[1].duration_ms, 243000);
+    }
 
     #[test]
     fn playback_state_becomes_a_track_and_position() {
