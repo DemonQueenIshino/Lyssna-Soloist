@@ -3838,8 +3838,10 @@ const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreen
 /// `/uid/` link, is opened again with it.
 const PROFILE_WINDOW_SCRIPT: &str = r#"(() => {
   // The site's script sends any page that finds WebView2's
-  // `chrome.webview` to its retired /embed page. The window uses no IPC.
+  // `chrome.webview` or `EmbeddedBrowserWebView` to its retired /embed
+  // page. The window uses no IPC.
   try {
+    delete window.EmbeddedBrowserWebView;
     const chrome = window.chrome;
     if (chrome && "webview" in chrome) {
       const visible = Object.create(Object.getPrototypeOf(chrome));
@@ -3943,34 +3945,62 @@ const PROFILE_WINDOW_SCRIPT: &str = r#"(() => {
   addEventListener("popstate", chromeless);
   chromeless();
 })();"#;
-/// Loads `url` once the window reports itself as current Chrome.
-/// spicylyrics.org serves "Embeds have been retired" to WebView2's own
-/// identity and to brand lists no real Chrome sends.
+/// Loads `url` with `script` as the page's only start-up script, once the
+/// window reports itself as current Chrome. spicylyrics.org serves
+/// "Embeds have been retired" to WebView2's own identity, to brand lists no
+/// real Chrome sends, and to pages carrying Tauri's globals.
 #[cfg(windows)]
-fn navigate_as_chrome(window: &tauri::WebviewWindow, url: tauri::Url) {
+fn navigate_as_chrome(window: &tauri::WebviewWindow, url: tauri::Url, script: String) {
     let fallback = window.clone();
     let target = url.to_string();
     let applied = window.with_webview(move |webview| unsafe {
-        use webview2_com::CallDevToolsProtocolMethodCompletedHandler;
+        use webview2_com::{
+            AddScriptToExecuteOnDocumentCreatedCompletedHandler,
+            CallDevToolsProtocolMethodCompletedHandler,
+        };
         use windows::core::{HSTRING, w};
         let Ok(core) = webview.controller().CoreWebView2() else {
             return;
         };
         let target = HSTRING::from(target);
-        let next = core.clone();
-        let then = target.clone();
-        let handler = CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |_, _| {
-            next.Navigate(&then)
-        }));
+        let fallback = (core.clone(), target.clone());
+        let ready = core.clone();
+        let added =
+            AddScriptToExecuteOnDocumentCreatedCompletedHandler::create(Box::new(move |_, id| {
+                // Tauri and wry register their scripts before this one, so
+                // under lower ids. They leave `isTauri`, `ipc` and Tauri's
+                // internals on the page for good, and the site's script
+                // sends any such page to its retired /embed page.
+                if let Ok(own) = id.parse::<u32>() {
+                    for earlier in 1..own {
+                        let _ = ready.RemoveScriptToExecuteOnDocumentCreated(&HSTRING::from(
+                            earlier.to_string(),
+                        ));
+                    }
+                }
+                let next = ready.clone();
+                let then = target.clone();
+                let handler =
+                    CallDevToolsProtocolMethodCompletedHandler::create(Box::new(move |_, _| {
+                        next.Navigate(&then)
+                    }));
+                if ready
+                    .CallDevToolsProtocolMethod(
+                        w!("Emulation.setUserAgentOverride"),
+                        &HSTRING::from(crate::chrome_release::cached().override_params()),
+                        &handler,
+                    )
+                    .is_err()
+                {
+                    ready.Navigate(&target)?;
+                }
+                Ok(())
+            }));
         if core
-            .CallDevToolsProtocolMethod(
-                w!("Emulation.setUserAgentOverride"),
-                &HSTRING::from(crate::chrome_release::cached().override_params()),
-                &handler,
-            )
+            .AddScriptToExecuteOnDocumentCreated(&HSTRING::from(script), &added)
             .is_err()
         {
-            let _ = core.Navigate(&target);
+            let _ = fallback.0.Navigate(&fallback.1);
         }
     });
     if applied.is_err() {
@@ -3978,7 +4008,7 @@ fn navigate_as_chrome(window: &tauri::WebviewWindow, url: tauri::Url) {
     }
 }
 #[cfg(not(windows))]
-fn navigate_as_chrome(window: &tauri::WebviewWindow, url: tauri::Url) {
+fn navigate_as_chrome(window: &tauri::WebviewWindow, url: tauri::Url, _script: String) {
     let _ = window.navigate(url);
 }
 /// Rounds a borderless window's corners wider than Windows' own 8 px.
@@ -4211,7 +4241,7 @@ async fn open_creator_profile(
             let _ = window.close();
             return Err(problem);
         }
-        navigate_as_chrome(&window, url);
+        navigate_as_chrome(&window, url, profile_window_script().to_string());
         let _ = app.emit("lyssna", json!({"type":"creator_profile","open":true}));
         let events = app.clone();
         let popup = window.clone();

@@ -176,18 +176,27 @@ impl Release {
 
     /// `Emulation.setUserAgentOverride` parameters for a WebView2 window.
     pub fn override_params(&self) -> String {
-        let list = |version: &str| -> Value {
+        let list = |version: &str, full: bool| -> Value {
             brands(self.major, version)
                 .into_iter()
-                .map(|(brand, version)| json!({"brand": brand, "version": version}))
+                .map(|(brand, version)| {
+                    // Chrome pads the greased brand's version in the full list
+                    // too, and the site checks it.
+                    let version = if full && !version.contains('.') {
+                        format!("{version}.0.0.0")
+                    } else {
+                        version
+                    };
+                    json!({"brand": brand, "version": version})
+                })
                 .collect()
         };
         json!({
             "userAgent": self.user_agent(),
             "platform": "Win32",
             "userAgentMetadata": {
-                "brands": list(&self.major.to_string()),
-                "fullVersionList": list(&self.version),
+                "brands": list(&self.major.to_string(), false),
+                "fullVersionList": list(&self.version, true),
                 "fullVersion": self.version,
                 "platform": "Windows",
                 "platformVersion": "15.0.0",
@@ -218,9 +227,14 @@ mod tests {
         assert!(release.user_agent().contains("Chrome/156.0.0.0"));
         let params: Value = serde_json::from_str(&release.override_params()).unwrap();
         assert_eq!(
-            params["userAgentMetadata"]["fullVersionList"][1]["version"],
-            "156.0.8078.80"
+            params["userAgentMetadata"]["fullVersionList"],
+            json!([
+                {"brand": "Not:A-Brand", "version": "8.0.0.0"},
+                {"brand": "Chromium", "version": "156.0.8078.80"},
+                {"brand": "Google Chrome", "version": "156.0.8078.80"},
+            ])
         );
+        assert_eq!(params["userAgentMetadata"]["brands"][0]["version"], "8");
     }
 
     #[test]
