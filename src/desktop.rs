@@ -3931,9 +3931,9 @@ const PROFILE_WINDOW_SCRIPT: &str = r#"(() => {
   addEventListener("popstate", chromeless);
   chromeless();
 })();"#;
-/// Loads `url` once the window reports itself as the Chrome release most
-/// people run. spicylyrics.org serves "Embeds have been retired" to any other
-/// client, WebView2's own identity and older or newer Chrome included.
+/// Loads `url` once the window reports itself as current Chrome.
+/// spicylyrics.org serves "Embeds have been retired" to WebView2's own
+/// identity and to brand lists no real Chrome sends.
 #[cfg(windows)]
 fn navigate_as_chrome(window: &tauri::WebviewWindow, url: tauri::Url) {
     let fallback = window.clone();

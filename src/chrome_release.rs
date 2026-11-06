@@ -1,6 +1,7 @@
 //! The Chrome release most Windows users run right now, read from Google's
-//! public release feed. spicylyrics.org answers only that Chrome, so its
-//! profiles and profile lookups present themselves as it.
+//! public release feed. spicylyrics.org answers only clients whose client
+//! hints match real Chrome's, greased brand included, so its profiles and
+//! profile lookups present themselves as this release.
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::{
