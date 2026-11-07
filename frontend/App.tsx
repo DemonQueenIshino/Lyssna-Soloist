@@ -5748,7 +5748,11 @@ function PlayerBar({
   queueActive: boolean;
 }) {
   const track = state.playback.item;
-  const [volume, setVolume] = useState(70);
+  const [volume, setVolume] = useState(
+    state.playback.device.volume_percent ??
+      state.settings.volume_percent ??
+      70,
+  );
   const volumeCallback = useRef(onPlayer);
   volumeCallback.current = onPlayer;
   const volumeControl = useMemo(
@@ -5768,13 +5772,16 @@ function PlayerBar({
     !(state.settings.soloist && state.playback.device.name === SOLOIST_DEVICE);
   useEffect(() => {
     volumeControl.observe(
-      state.playback.device.volume_percent,
+      state.playback.device.volume_percent ??
+        (state.settings.soloist ? state.settings.volume_percent : undefined),
       state.playback.device.id ?? state.playback.device.name,
     );
   }, [
     state.playback.device.volume_percent,
     state.playback.device.id,
     state.playback.device.name,
+    state.settings.soloist,
+    state.settings.volume_percent,
     volumeControl,
   ]);
   return (
